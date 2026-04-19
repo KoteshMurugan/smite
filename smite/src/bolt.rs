@@ -4,7 +4,11 @@
 //! protocol messages as specified in the BOLT specifications.
 
 mod accept_channel;
+mod accept_channel2;
 mod channel_ready;
+mod channel_reestablish;
+mod closing_signed;
+mod commitment_signed;
 mod error;
 mod funding_created;
 mod funding_signed;
@@ -17,15 +21,24 @@ mod pong;
 mod shutdown;
 mod tlv;
 mod tx_abort;
+mod tx_ack_rbf;
+mod tx_add_input;
+mod tx_add_output;
 mod tx_complete;
+mod tx_init_rbf;
 mod tx_remove_input;
 mod tx_remove_output;
+mod tx_signatures;
 mod types;
 mod warning;
 mod wire;
 
 pub use accept_channel::{AcceptChannel, AcceptChannelTlvs};
+pub use accept_channel2::{AcceptChannel2, AcceptChannel2Tlvs};
 pub use channel_ready::{ChannelReady, ChannelReadyTlvs};
+pub use channel_reestablish::ChannelReestablish;
+pub use closing_signed::{ClosingSigned, ClosingSignedTlvs, FeeRange};
+pub use commitment_signed::CommitmentSigned;
 pub use error::Error;
 pub use funding_created::FundingCreated;
 pub use funding_signed::FundingSigned;
@@ -38,9 +51,14 @@ pub use pong::Pong;
 pub use shutdown::Shutdown;
 pub use tlv::{TlvRecord, TlvStream};
 pub use tx_abort::TxAbort;
+pub use tx_ack_rbf::{TxAckRbf, TxAckRbfTlvs};
+pub use tx_add_input::TxAddInput;
+pub use tx_add_output::TxAddOutput;
 pub use tx_complete::TxComplete;
+pub use tx_init_rbf::{TxInitRbf, TxInitRbfTlvs};
 pub use tx_remove_input::TxRemoveInput;
 pub use tx_remove_output::TxRemoveOutput;
+pub use tx_signatures::{TxSignatures, Witness};
 pub use types::{
     BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, MAX_MESSAGE_SIZE, PUBLIC_KEY_SIZE,
     TXID_SIZE, Txid,
@@ -125,16 +143,34 @@ pub mod msg_type {
     pub const CHANNEL_READY: u16 = 36;
     /// Shutdown message (BOLT 2).
     pub const SHUTDOWN: u16 = 38;
+    /// `closing_signed` message (BOLT 2).
+    pub const CLOSING_SIGNED: u16 = 39;
     /// `open_channel2` message (BOLT 2).
     pub const OPEN_CHANNEL2: u16 = 64;
+    /// `accept_channel2` message (BOLT 2).
+    pub const ACCEPT_CHANNEL2: u16 = 65;
+    /// `tx_add_input` message (BOLT 2).
+    pub const TX_ADD_INPUT: u16 = 66;
+    /// `tx_add_output` message (BOLT 2).
+    pub const TX_ADD_OUTPUT: u16 = 67;
     /// `tx_remove_input` message (BOLT 2).
     pub const TX_REMOVE_INPUT: u16 = 68;
     /// `tx_remove_output` message (BOLT 2).
     pub const TX_REMOVE_OUTPUT: u16 = 69;
     /// `tx_complete` message (BOLT 2).
     pub const TX_COMPLETE: u16 = 70;
+    /// `tx_signatures` message (BOLT 2).
+    pub const TX_SIGNATURES: u16 = 71;
+    /// `tx_init_rbf` message (BOLT 2).
+    pub const TX_INIT_RBF: u16 = 72;
+    /// `tx_ack_rbf` message (BOLT 2).
+    pub const TX_ACK_RBF: u16 = 73;
     /// `tx_abort` message (BOLT 2).
     pub const TX_ABORT: u16 = 74;
+    /// `commitment_signed` message (BOLT 2).
+    pub const COMMITMENT_SIGNED: u16 = 132;
+    /// `channel_reestablish` message (BOLT 1).
+    pub const CHANNEL_REESTABLISH: u16 = 136;
     /// Gossip timestamp filter message (BOLT 7).
     pub const GOSSIP_TIMESTAMP_FILTER: u16 = 265;
 }
@@ -165,16 +201,34 @@ pub enum Message {
     ChannelReady(ChannelReady),
     /// Shutdown message (type 38).
     Shutdown(Shutdown),
+    /// `closing_signed` message (type 39).
+    ClosingSigned(ClosingSigned),
     /// `open_channel2` message (type 64).
     OpenChannel2(OpenChannel2),
+    /// `accept_channel2` message (type 65).
+    AcceptChannel2(AcceptChannel2),
+    /// `tx_add_input` message (type 66).
+    TxAddInput(TxAddInput),
+    /// `tx_add_output` message (type 67).
+    TxAddOutput(TxAddOutput),
     /// `tx_remove_input` message (type 68).
     TxRemoveInput(TxRemoveInput),
     /// `tx_remove_output` message (type 69).
     TxRemoveOutput(TxRemoveOutput),
     /// `tx_complete` message (type 70).
     TxComplete(TxComplete),
+    /// `tx_signatures` message (type 71).
+    TxSignatures(TxSignatures),
+    /// `tx_init_rbf` message (type 72).
+    TxInitRbf(TxInitRbf),
+    /// `tx_ack_rbf` message (type 73).
+    TxAckRbf(TxAckRbf),
     /// `tx_abort` message (type 74).
     TxAbort(TxAbort),
+    /// `commitment_signed` message (type 132).
+    CommitmentSigned(CommitmentSigned),
+    /// `channel_reestablish` message (type 136).
+    ChannelReestablish(ChannelReestablish),
     /// Gossip timestamp filter message (type 265).
     GossipTimestampFilter(GossipTimestampFilter),
     /// Unknown message type.
@@ -205,11 +259,20 @@ impl Message {
             Self::FundingSigned(_) => msg_type::FUNDING_SIGNED,
             Self::ChannelReady(_) => msg_type::CHANNEL_READY,
             Self::Shutdown(_) => msg_type::SHUTDOWN,
+            Self::ClosingSigned(_) => msg_type::CLOSING_SIGNED,
             Self::OpenChannel2(_) => msg_type::OPEN_CHANNEL2,
+            Self::AcceptChannel2(_) => msg_type::ACCEPT_CHANNEL2,
+            Self::TxAddInput(_) => msg_type::TX_ADD_INPUT,
+            Self::TxAddOutput(_) => msg_type::TX_ADD_OUTPUT,
             Self::TxRemoveInput(_) => msg_type::TX_REMOVE_INPUT,
             Self::TxRemoveOutput(_) => msg_type::TX_REMOVE_OUTPUT,
             Self::TxComplete(_) => msg_type::TX_COMPLETE,
+            Self::TxSignatures(_) => msg_type::TX_SIGNATURES,
+            Self::TxInitRbf(_) => msg_type::TX_INIT_RBF,
+            Self::TxAckRbf(_) => msg_type::TX_ACK_RBF,
             Self::TxAbort(_) => msg_type::TX_ABORT,
+            Self::CommitmentSigned(_) => msg_type::COMMITMENT_SIGNED,
+            Self::ChannelReestablish(_) => msg_type::CHANNEL_REESTABLISH,
             Self::GossipTimestampFilter(_) => msg_type::GOSSIP_TIMESTAMP_FILTER,
             Self::Unknown { msg_type, .. } => *msg_type,
         }
@@ -232,11 +295,20 @@ impl Message {
             Self::FundingSigned(m) => out.extend(m.encode()),
             Self::ChannelReady(m) => out.extend(m.encode()),
             Self::Shutdown(m) => out.extend(m.encode()),
+            Self::ClosingSigned(m) => out.extend(m.encode()),
             Self::OpenChannel2(m) => out.extend(m.encode()),
+            Self::AcceptChannel2(m) => out.extend(m.encode()),
+            Self::TxAddInput(m) => out.extend(m.encode()),
+            Self::TxAddOutput(m) => out.extend(m.encode()),
             Self::TxRemoveInput(m) => out.extend(m.encode()),
             Self::TxRemoveOutput(m) => out.extend(m.encode()),
             Self::TxComplete(m) => out.extend(m.encode()),
+            Self::TxSignatures(m) => out.extend(m.encode()),
+            Self::TxInitRbf(m) => out.extend(m.encode()),
+            Self::TxAckRbf(m) => out.extend(m.encode()),
             Self::TxAbort(m) => out.extend(m.encode()),
+            Self::CommitmentSigned(m) => out.extend(m.encode()),
+            Self::ChannelReestablish(m) => out.extend(m.encode()),
             Self::GossipTimestampFilter(m) => out.extend(m.encode()),
             Self::Unknown { payload, .. } => out.extend(payload),
         }
@@ -266,11 +338,24 @@ impl Message {
             msg_type::FUNDING_SIGNED => Ok(Self::FundingSigned(FundingSigned::decode(cursor)?)),
             msg_type::CHANNEL_READY => Ok(Self::ChannelReady(ChannelReady::decode(cursor)?)),
             msg_type::SHUTDOWN => Ok(Self::Shutdown(Shutdown::decode(cursor)?)),
+            msg_type::CLOSING_SIGNED => Ok(Self::ClosingSigned(ClosingSigned::decode(cursor)?)),
             msg_type::OPEN_CHANNEL2 => Ok(Self::OpenChannel2(OpenChannel2::decode(cursor)?)),
+            msg_type::ACCEPT_CHANNEL2 => Ok(Self::AcceptChannel2(AcceptChannel2::decode(cursor)?)),
+            msg_type::TX_ADD_INPUT => Ok(Self::TxAddInput(TxAddInput::decode(cursor)?)),
+            msg_type::TX_ADD_OUTPUT => Ok(Self::TxAddOutput(TxAddOutput::decode(cursor)?)),
             msg_type::TX_REMOVE_INPUT => Ok(Self::TxRemoveInput(TxRemoveInput::decode(cursor)?)),
             msg_type::TX_REMOVE_OUTPUT => Ok(Self::TxRemoveOutput(TxRemoveOutput::decode(cursor)?)),
             msg_type::TX_COMPLETE => Ok(Self::TxComplete(TxComplete::decode(cursor)?)),
+            msg_type::TX_SIGNATURES => Ok(Self::TxSignatures(TxSignatures::decode(cursor)?)),
+            msg_type::TX_INIT_RBF => Ok(Self::TxInitRbf(TxInitRbf::decode(cursor)?)),
+            msg_type::TX_ACK_RBF => Ok(Self::TxAckRbf(TxAckRbf::decode(cursor)?)),
             msg_type::TX_ABORT => Ok(Self::TxAbort(TxAbort::decode(cursor)?)),
+            msg_type::COMMITMENT_SIGNED => {
+                Ok(Self::CommitmentSigned(CommitmentSigned::decode(cursor)?))
+            }
+            msg_type::CHANNEL_REESTABLISH => {
+                Ok(Self::ChannelReestablish(ChannelReestablish::decode(cursor)?))
+            }
             msg_type::GOSSIP_TIMESTAMP_FILTER => Ok(Self::GossipTimestampFilter(
                 GossipTimestampFilter::decode(cursor)?,
             )),
