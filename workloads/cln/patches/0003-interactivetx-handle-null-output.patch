@@ -1,0 +1,24 @@
+From: Kotesh Murugan <koteshlost@gmail.com>
+Subject: [PATCH 3/4] interactivetx: handle NULL from psbt_append_output
+
+Follow-up to 0002. With the assert removed, psbt_append_output can now
+return NULL when libwally rejects the insert. The interactive-tx loop
+must surface that as a protocol error string instead of dereferencing
+NULL.
+
+---
+ common/interactivetx.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/common/interactivetx.c b/common/interactivetx.c
+--- a/common/interactivetx.c
++++ b/common/interactivetx.c
+@@ -740,6 +740,8 @@ static char *process_tx_add_output(const tal_t *ctx,
+ 			out = psbt_append_output(ictx->current_psbt,
+ 						 scriptpubkey,
+ 						 amount_sat(sats));
++			if (!out)
++				return tal_fmt(ctx, "Output rejected by PSBT");
+ 			psbt_output_set_serial_id(ictx->current_psbt,
+ 						  out, serial_id);
+ 			break;

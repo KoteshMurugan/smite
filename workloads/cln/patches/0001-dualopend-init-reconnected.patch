@@ -1,0 +1,28 @@
+From: Kotesh Murugan <koteshlost@gmail.com>
+Subject: [PATCH 1/4] dualopend: zero-init main state to silence UBSan on reconnected
+
+Crash signature (Nyx, AFL++, dual_funding scenario, CLN v25.12.1):
+
+    runtime error: load of value 254, which is not a valid value for type 'bool'
+    openingd/dualopend.c: in main()                  state->reconnected
+
+`state->reconnected` is read on the first peer message before any code path
+assigns it, because `tal()` returns uninitialised memory. UBSan trips on
+the garbage byte; the crash handler reports it via Nyx and the snapshot
+resets. Switching to `talz()` zero-initialises the whole struct, which is
+what every other dualopend code path already assumes.
+
+---
+ openingd/dualopend.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/openingd/dualopend.c b/openingd/dualopend.c
+--- a/openingd/dualopend.c
++++ b/openingd/dualopend.c
+@@ -4340,7 +4340,7 @@ int main(int argc, char *argv[])
+ 	struct pollfd pollfd[2];
+-	struct state *state = tal(NULL, struct state);
++	struct state *state = talz(NULL, struct state);
+ 	struct secret *none;
+ 	struct fee_states *fee_states;
+ 	enum side opener;
