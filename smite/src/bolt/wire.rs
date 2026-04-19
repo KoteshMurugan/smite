@@ -60,6 +60,7 @@ impl_wire_format_int!(u8);
 impl_wire_format_int!(u16);
 impl_wire_format_int!(u32);
 impl_wire_format_int!(u64);
+impl_wire_format_int!(i64);
 
 impl WireFormat for PublicKey {
     fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
