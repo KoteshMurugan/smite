@@ -11,6 +11,7 @@ pub use eclair::{EclairConfig, EclairTarget};
 pub use ldk::{LdkConfig, LdkTarget};
 pub use lnd::{LndConfig, LndTarget};
 use smite::scenarios::TargetError;
+use smite_ir::context::FundingUtxo;
 
 use std::net::SocketAddr;
 
@@ -71,4 +72,13 @@ pub trait Target: Sized {
     ///
     /// Returns [`TargetError::Crashed`] if the target has crashed.
     fn check_alive(&mut self) -> Result<(), TargetError>;
+
+    /// Fuzzer-controlled UTXOs available for real dual-funding contributions.
+    ///
+    /// These are funded regtest P2WPKH UTXOs where the fuzzer holds the private
+    /// key.  The default implementation returns an empty vec (no UTXOs) for
+    /// targets that do not set up a fuzzer wallet (e.g., non-CLN targets).
+    fn funding_utxos(&self) -> Vec<FundingUtxo> {
+        vec![]
+    }
 }

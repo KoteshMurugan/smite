@@ -1,9 +1,11 @@
 //! Scenario implementations and helpers.
 
+mod dual_funding;
 mod encrypted_bytes;
 mod init;
 mod noise;
 
+pub use dual_funding::DualFundingScenario;
 pub use encrypted_bytes::EncryptedBytesScenario;
 pub use init::InitScenario;
 pub use noise::NoiseScenario;
@@ -27,6 +29,25 @@ const EPHEMERAL_KEY: [u8; 32] = [
     0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
     0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
 ];
+
+/// `option_dual_fund` feature bits (BOLT 9).
+///
+/// Bit 28 = required version, bit 29 = optional version.
+/// CLN v25.x with `--experimental-dual-fund` advertises bit 29 (optional).
+/// Feature is negotiated if EITHER bit is set on both sides.
+const OPT_DUAL_FUND_BIT_REQUIRED: usize = 28;
+const OPT_DUAL_FUND_BIT_OPTIONAL: usize = 29;
+
+/// Check whether a feature bit is set in a big-endian feature byte vector.
+fn has_feature_bit(features: &[u8], bit: usize) -> bool {
+    let byte_from_end = bit / 8;
+    let bit_mask = 1u8 << (bit % 8);
+    if features.len() <= byte_from_end {
+        return false;
+    }
+    let idx = features.len() - 1 - byte_from_end;
+    features[idx] & bit_mask != 0
+}
 
 /// Connect to a target and perform the init handshake.
 ///
@@ -55,9 +76,35 @@ pub fn connect_to_target<T: Target>(
         return Err(ScenarioError::Protocol("expected init message".into()));
     };
 
+    log::debug!(
+        "Target init: globalfeatures={} features={}",
+        hex::encode(&init.globalfeatures),
+        hex::encode(&init.features),
+    );
+
     // Echo features back, removing TLVs
-    let init = Init::echo(&init);
-    let encoded = Message::Init(init).encode();
+    let our_init = Init::echo(&init);
+
+    log::debug!(
+        "Our  init: globalfeatures={} features={}",
+        hex::encode(&our_init.globalfeatures),
+        hex::encode(&our_init.features),
+    );
+
+    // Warn if CLN did not advertise option_dual_fund (neither bit 28 nor 29).
+    // Bit 29 (optional) is what CLN v25 uses with --experimental-dual-fund.
+    // Bit 28 (required) is what strict BOLT-compliant nodes use.
+    if !has_feature_bit(&our_init.features, OPT_DUAL_FUND_BIT_REQUIRED)
+        && !has_feature_bit(&our_init.features, OPT_DUAL_FUND_BIT_OPTIONAL)
+    {
+        log::warn!(
+            "CLN did not advertise option_dual_fund (bits 28/29)! \
+             open_channel2 will be rejected. \
+             Ensure lightningd is started with --experimental-dual-fund."
+        );
+    }
+
+    let encoded = Message::Init(our_init).encode();
     conn.send_message(&encoded)?;
 
     log::debug!("Connected to target, init exchange complete");

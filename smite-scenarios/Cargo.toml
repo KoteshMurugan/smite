@@ -12,12 +12,16 @@ workspace = true
 
 [dependencies]
 smite = { path = "../smite" }
+smite-ir = { path = "../smite-ir" }
 smite-nyx-sys = { path = "../smite-nyx-sys", optional = true }
 
 log.workspace = true
 simple_logger.workspace = true
 secp256k1.workspace = true
+rand = { version = "0.10", default-features = false }
+postcard.workspace = true
 
+bs58 = "0.5"
 hex = "0.4"
 libc = "0.2"
 serde.workspace = true

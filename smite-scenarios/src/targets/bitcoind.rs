@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
+
 use smite::process::ManagedProcess;
 
 use super::TargetError;
@@ -96,6 +99,23 @@ pub fn start(config: &BitcoindConfig, data_dir: &Path) -> Result<ManagedProcess,
         cmd.arg(arg);
     }
 
+    // macOS sets RLIMIT_NOFILE soft limit to RLIM_INFINITY (2^63-1). When
+    // Bitcoin Core casts this to `int` it overflows to -1, causing the fd
+    // availability check to fail with "Not enough file descriptors available.
+    // -1 available, 160 required." Set a concrete limit in the child process
+    // before exec so Bitcoin Core's arithmetic works correctly.
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            let lim = libc::rlimit {
+                rlim_cur: 10240,
+                rlim_max: 10240,
+            };
+            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+            Ok(())
+        });
+    }
+
     let bitcoind = ManagedProcess::spawn(&mut cmd, "bitcoind")?;
 
     // Wait for bitcoind to be ready
@@ -131,28 +151,61 @@ fn setup_wallet(
     bitcoind_dir: &Path,
     bitcoind: ManagedProcess,
 ) -> Result<ManagedProcess, TargetError> {
-    // Create wallet
-    let _ = Command::new("bitcoin-cli")
-        .arg("-regtest")
-        .arg(format!("-datadir={}", bitcoind_dir.display()))
-        .arg(format!("-rpcport={}", config.rpc_port))
-        .arg("-rpcuser=rpcuser")
-        .arg("-rpcpassword=rpcpass")
+    let rpc_args = || {
+        vec![
+            "-regtest".to_string(),
+            format!("-datadir={}", bitcoind_dir.display()),
+            format!("-rpcport={}", config.rpc_port),
+            "-rpcuser=rpcuser".to_string(),
+            "-rpcpassword=rpcpass".to_string(),
+        ]
+    };
+
+    // Try createwallet; if it fails (wallet already exists on disk), try loadwallet.
+    // Bitcoin Core v22+ does not auto-load wallets from disk on startup.
+    let created = Command::new("bitcoin-cli")
+        .args(rpc_args())
         .arg("createwallet")
         .arg("default")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .is_ok_and(|s| s.success());
 
-    // Generate initial blocks
+    if !created {
+        // Wallet may already exist from a previous run — attempt to load it.
+        let _ = Command::new("bitcoin-cli")
+            .args(rpc_args())
+            .arg("loadwallet")
+            .arg("default")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    // Get a fresh address from the wallet, then generate blocks to it.
+    // This is compatible with Bitcoin Core v21–v27 (unlike `bitcoin-cli -generate`
+    // which silently fails when no wallet is loaded in newer Core versions).
+    let addr_output = Command::new("bitcoin-cli")
+        .args(rpc_args())
+        .arg("-rpcwallet=default")
+        .arg("getnewaddress")
+        .output()?;
+
+    if !addr_output.status.success() {
+        return Err(TargetError::StartFailed(
+            "failed to get new address from wallet".into(),
+        ));
+    }
+
+    let addr = String::from_utf8_lossy(&addr_output.stdout).trim().to_string();
+
     let status = Command::new("bitcoin-cli")
-        .arg("-regtest")
-        .arg(format!("-datadir={}", bitcoind_dir.display()))
-        .arg(format!("-rpcport={}", config.rpc_port))
-        .arg("-rpcuser=rpcuser")
-        .arg("-rpcpassword=rpcpass")
-        .arg("-generate")
+        .args(rpc_args())
+        .arg("-rpcwallet=default")
+        .arg("generatetoaddress")
         .arg(INITIAL_BLOCKS.to_string())
+        .arg(&addr)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?;
