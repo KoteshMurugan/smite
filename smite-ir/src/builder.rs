@@ -127,6 +127,15 @@ impl ProgramBuilder {
         }
     }
 
+    /// Emit a fresh `PrivateKey` + `DerivePoint` pair and return both
+    /// indices.  Used when a generator needs the privkey for signing later
+    /// (e.g. building a `commitment_signed` from the funding key).
+    pub fn generate_fresh_keypair(&mut self, rng: &mut impl Rng) -> (usize, usize) {
+        let sk_idx = self.generate_fresh(VariableType::PrivateKey, rng);
+        let pk_idx = self.append(Operation::DerivePoint, &[sk_idx]);
+        (sk_idx, pk_idx)
+    }
+
     /// Emits instructions that produce a fresh value of the given type.
     ///
     /// # Panics
@@ -161,11 +170,19 @@ impl ProgramBuilder {
                 let sk_idx = self.generate_fresh(VariableType::PrivateKey, rng);
                 self.append(Operation::DerivePoint, &[sk_idx])
             }
+            // PrivateKey -> Point keypair handled above; the dedicated
+            // `generate_fresh_keypair` returns both indices.
             VariableType::Message => {
                 panic!("cannot generate fresh Message: requires composed inputs")
             }
             VariableType::AcceptChannel => {
                 panic!("cannot generate fresh AcceptChannel: requires protocol interaction")
+            }
+            VariableType::AcceptChannel2 => {
+                panic!("cannot generate fresh AcceptChannel2: requires protocol interaction")
+            }
+            VariableType::SignedAmount => {
+                self.append(Operation::LoadSignedAmount(rng.random()), &[])
             }
         }
     }

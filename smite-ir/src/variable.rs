@@ -4,7 +4,7 @@
 //! The serialized program stores data only in [`Operation`] literals.
 
 use secp256k1::PublicKey;
-use smite::bolt::{AcceptChannel, ChannelId};
+use smite::bolt::{AcceptChannel, AcceptChannel2, ChannelId};
 
 const CHAIN_HASH_SIZE: usize = 32;
 const PRIVATE_KEY_SIZE: usize = 32;
@@ -40,6 +40,10 @@ pub enum Variable {
     Message(Vec<u8>),
     /// Parsed `accept_channel` response.
     AcceptChannel(AcceptChannel),
+    /// Parsed `accept_channel2` response.
+    AcceptChannel2(AcceptChannel2),
+    /// Signed satoshi amount (for RBF funding_output_contribution).
+    SignedAmount(i64),
 }
 
 impl Variable {
@@ -60,6 +64,8 @@ impl Variable {
             Self::Features(_) => VariableType::Features,
             Self::Message(_) => VariableType::Message,
             Self::AcceptChannel(_) => VariableType::AcceptChannel,
+            Self::AcceptChannel2(_) => VariableType::AcceptChannel2,
+            Self::SignedAmount(_) => VariableType::SignedAmount,
         }
     }
 }
@@ -81,4 +87,6 @@ pub enum VariableType {
     Features,
     Message,
     AcceptChannel,
+    AcceptChannel2,
+    SignedAmount,
 }
