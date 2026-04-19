@@ -4,7 +4,7 @@ use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
 use super::*;
-use generators::OpenChannelGenerator;
+use generators::{InteractiveTxGenerator, OpenChannelGenerator};
 use operation::AcceptChannelField;
 
 /// Helper to build a private key with a single distinguishing byte.
@@ -416,4 +416,126 @@ fn append_type_mismatch_panics() {
     let mut builder = ProgramBuilder::new();
     let amount = builder.generate_fresh(VariableType::Amount, &mut rng);
     builder.append(Operation::DerivePoint, &[amount]);
+}
+
+// ── InteractiveTxGenerator tests ────────────────────────────────────────────
+
+fn generate_interactive_tx_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    InteractiveTxGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+/// Every generated program must be type-correct (enforced by ProgramBuilder).
+#[test]
+fn interactive_tx_generator_is_type_correct() {
+    for seed in 0..100 {
+        generate_interactive_tx_program(seed);
+    }
+}
+
+/// Every generated program serializes and deserializes without loss.
+#[test]
+fn interactive_tx_generator_postcard_roundtrip() {
+    let program = generate_interactive_tx_program(7);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+/// Every generated program contains the expected structural elements.
+#[test]
+fn interactive_tx_generator_structure() {
+    for seed in 0..20 {
+        let program = generate_interactive_tx_program(seed);
+        let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+        // Must contain BuildOpenChannel2.
+        assert!(
+            ops.iter().any(|op| matches!(op, Operation::BuildOpenChannel2)),
+            "seed {seed}: expected BuildOpenChannel2",
+        );
+        // Must contain RecvAcceptChannel2.
+        assert!(
+            ops.iter().any(|op| matches!(op, Operation::RecvAcceptChannel2)),
+            "seed {seed}: expected RecvAcceptChannel2",
+        );
+        // The program takes either the normal path or the abort path (20% chance).
+        let is_abort = ops.iter().any(|op| matches!(op, Operation::BuildTxAbort));
+        if is_abort {
+            // Abort path: must have BuildTxAbort and end with SendMessage.
+            assert!(
+                matches!(ops.last(), Some(Operation::SendMessage)),
+                "seed {seed}: abort path — last instruction should be SendMessage",
+            );
+        } else {
+            // Normal path: must contain BuildTxComplete, RecvTxComplete, BuildTxSignatures.
+            assert!(
+                ops.iter().any(|op| matches!(op, Operation::BuildTxComplete)),
+                "seed {seed}: expected BuildTxComplete",
+            );
+            assert!(
+                ops.iter().any(|op| matches!(op, Operation::RecvTxComplete)),
+                "seed {seed}: expected RecvTxComplete",
+            );
+            assert!(
+                ops.iter().any(|op| matches!(op, Operation::BuildTxSignatures)),
+                "seed {seed}: expected BuildTxSignatures",
+            );
+            // Must end with a terminal operation.  Before the RBF/close/
+            // reestablish phases were added the terminal was always SendMessage
+            // (tx_signatures or shutdown send).  Now the program may also end
+            // with a Recv* operation from the optional phases that follow
+            // tx_signatures (RBF round, channel_reestablish, closing_signed).
+            let valid_terminal = matches!(
+                ops.last(),
+                Some(
+                    Operation::SendMessage
+                    | Operation::RecvTxAckRbf
+                    | Operation::RecvTxComplete
+                    | Operation::RecvTxSignatures  // fallback: no-op Recv
+                    | Operation::RecvChannelReestablish
+                    | Operation::RecvClosingSigned
+                    | Operation::RecvShutdown
+                    | Operation::RecvTxAbort
+                )
+            );
+            assert!(
+                valid_terminal,
+                "seed {seed}: last instruction should be SendMessage or a Recv* terminal, \
+                 got {:?}",
+                ops.last()
+            );
+        }
+        // Must have 7 fresh key derivations (7 Point inputs for open_channel2).
+        let derive_count = program
+            .instructions
+            .iter()
+            .filter(|i| matches!(i.operation, Operation::DerivePoint))
+            .count();
+        assert!(
+            derive_count >= 7,
+            "seed {seed}: expected ≥7 DerivePoint instructions, got {derive_count}",
+        );
+        // Serial IDs in BuildTxAddInput/BuildTxAddOutput must be even.
+        for (idx, instr) in program.instructions.iter().enumerate() {
+            if matches!(
+                instr.operation,
+                Operation::BuildTxAddInput | Operation::BuildTxAddOutput
+            ) {
+                // inputs[1] is the serial_id instruction index.
+                let serial_id_instr_idx = instr.inputs[1];
+                if let Operation::LoadAmount(serial_id) =
+                    program.instructions[serial_id_instr_idx].operation
+                {
+                    assert_eq!(
+                        serial_id % 2,
+                        0,
+                        "instr {idx}: serial_id {serial_id} must be even (initiator parity)",
+                    );
+                }
+            }
+        }
+    }
 }

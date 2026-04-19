@@ -7,6 +7,7 @@
 
 pub mod builder;
 pub mod context;
+pub mod executor;
 pub mod generators;
 pub mod instruction;
 pub mod operation;
@@ -15,7 +16,8 @@ pub mod variable;
 
 pub use builder::ProgramBuilder;
 pub use context::ProgramContext;
-pub use generators::Generator;
+pub use executor::{Executor, ExecutorError};
+pub use generators::{Generator, InteractiveTxGenerator, OpenChannelGenerator};
 pub use instruction::Instruction;
 pub use operation::Operation;
 pub use program::Program;

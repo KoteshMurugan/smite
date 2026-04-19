@@ -5,8 +5,10 @@
 //! protocol flow but delegates value selection and variable reuse to
 //! `ProgramBuilder`.
 
+mod interactive_tx;
 mod open_channel;
 
+pub use interactive_tx::InteractiveTxGenerator;
 pub use open_channel::OpenChannelGenerator;
 
 use rand::Rng;
