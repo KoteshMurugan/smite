@@ -65,7 +65,7 @@ fn generate_tx_abort(rng: &mut impl rand::Rng) -> Vec<u8> {
     let funding_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate      = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     // Zero contribution for abort path — CLN still processes open_channel2.
-    let funding_sats        = b.append(Operation::LoadAmount(0), &[]);
+    let funding_sats        = b.append(Operation::LoadAmount(100_000), &[]);
     let dust_limit          = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight   = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min            = b.append(Operation::LoadAmount(1), &[]);
@@ -91,16 +91,46 @@ fn generate_tx_abort(rng: &mut impl rand::Rng) -> Vec<u8> {
 
     // ── Phase 2: accept_channel2 → compute channel_id ────────────────────────
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
+
+    // Extract their funding_pubkey + funding_satoshis to construct the
+    // canonical 2-of-2 funding output.  CLN's find_funding_output
+    // (openingd/dualopend.c:2776-2814) aborts the open with
+    //   "Expected output ... not found on funding tx"
+    // if no PSBT output matches scriptpubkey_p2wsh(redeem_2of2(our_fpk, their_fpk)).
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
 
     // ── Phase 3: tx_abort ─────────────────────────────────────────────────────
     let abort_data = b.append(Operation::LoadBytes(b"smite fuzzer abort".to_vec()), &[]);
@@ -118,7 +148,8 @@ fn generate_shutdown(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
     // ── Keys ─────────────────────────────────────────────────────────────────
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    // Funding keypair: keep both indices so we can sign the commitment tx.
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -131,9 +162,11 @@ fn generate_shutdown(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id     = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate      = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    // Zero contribution for the shutdown seed.  The real dual-funding seeds
-    // are in generate_valid() which uses LoadFundingUtxo* operations.
-    let funding_sats        = b.append(Operation::LoadAmount(0), &[]);
+    // We contribute 500,000 sats backed by a real fuzzer UTXO (1,000,000 sats),
+    // leaving 500,000 sats as fee budget.  CLN aborts the open with
+    //   "Insufficiently funded funding tx, initiator inputs less than outputs"
+    // if our declared funding_sats > our actual tx_add_input contribution.
+    let funding_sats        = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit          = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight   = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min            = b.append(Operation::LoadAmount(1), &[]);
@@ -159,32 +192,122 @@ fn generate_shutdown(rng: &mut impl rand::Rng) -> Vec<u8> {
 
     // ── Phase 2: accept_channel2 → compute channel_id ────────────────────────
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
 
-    // ── Phase 3: tx_complete (zero contribution) ──────────────────────────────
+    // Extract their funding_pubkey + funding_satoshis to construct the
+    // canonical 2-of-2 funding output.  CLN's find_funding_output
+    // (openingd/dualopend.c:2776-2814) aborts the open with
+    //   "Expected output ... not found on funding tx"
+    // if no PSBT output matches scriptpubkey_p2wsh(redeem_2of2(our_fpk, their_fpk)).
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // ── Phase 2b: tx_add_input (real fuzzer UTXO, serial_id=2 = even) ────────
+    let __prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
+    let __prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
+    let __serial_id_input = b.append(Operation::LoadAmount(2), &[]);
+    let __sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
+    let __tx_add_input    = b.append(
+        Operation::BuildTxAddInput,
+        &[channel_id, __serial_id_input, __prevtx, __prevtx_vout, __sequence],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_input]);
+    b.append(Operation::RecvTxAddInput, &[]);
+
+    // ── Phase 3: tx_complete ──────────────────────────────────────────────────
     let tx_complete = b.append(Operation::BuildTxComplete, &[channel_id]);
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
 
-    // ── Phase 4: receive CLN's tx_signatures → extract real txid ─────────────
+    // ── Phase 4: send a *cryptographically valid* commitment_signed ──────────
+    // The executor reconstructs the funding tx from its tracked itx state
+    // and signs the BIP 143 sighash with our funding privkey.  If CLN
+    // accepts our sig, it proceeds to send tx_signatures with the real txid;
+    // the channel reaches the lock-in path which exercises significantly
+    // more of dualopend.c (handle_funding_depth, send_channel_ready, etc.).
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
 
-    // ── Phase 5: send tx_signatures (empty witnesses — zero contribution) ─────
-    let witnesses = b.append(Operation::LoadBytes(vec![]), &[]);
+    // ── Phase 5: send tx_signatures with real BIP 143 witness ────────────────
+    let witnesses = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs   = b.append(Operation::BuildTxSignatures, &[channel_id, their_txid, witnesses]);
     b.append(Operation::SendMessage, &[tx_sigs]);
 
     // ── Phase 6: shutdown ↔ shutdown ─────────────────────────────────────────
-    let scriptpubkey = b.append(Operation::LoadBytes(vec![]), &[]);
+    // Valid P2WPKH script (0x00 0x14 || 20-byte hash) — empty/random bytes
+    // are rejected by CLN with "Bad shutdown scriptpubkey", which leaves the
+    // dualopend daemon in DUALOPEND_AWAITING_LOCKIN and blocks lightningd
+    // shutdown later in the test run.
+    let scriptpubkey = b.append(
+        Operation::LoadBytes(vec![
+            0x00, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]),
+        &[],
+    );
     let shutdown = b.append(Operation::BuildShutdown, &[channel_id, scriptpubkey]);
     b.append(Operation::SendMessage, &[shutdown]);
     // Wait for CLN's shutdown reply so we observe handle_peer_shutdown completing.
@@ -204,7 +327,7 @@ fn generate_close(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
     // Identical key/parameter setup to the shutdown seed.
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -216,7 +339,8 @@ fn generate_close(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id     = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate      = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    let funding_sats        = b.append(Operation::LoadAmount(0), &[]);
+    // 500k contribution backed by real fuzzer UTXO (1M sats), 500k fee budget.
+    let funding_sats        = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit          = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight   = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min            = b.append(Operation::LoadAmount(1), &[]);
@@ -240,39 +364,140 @@ fn generate_close(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
+
+    // Extract their funding_pubkey + funding_satoshis to construct the
+    // canonical 2-of-2 funding output.  CLN's find_funding_output
+    // (openingd/dualopend.c:2776-2814) aborts the open with
+    //   "Expected output ... not found on funding tx"
+    // if no PSBT output matches scriptpubkey_p2wsh(redeem_2of2(our_fpk, their_fpk)).
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // tx_add_input (real fuzzer UTXO, serial_id=2 = even initiator parity)
+    let __prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
+    let __prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
+    let __serial_id_input = b.append(Operation::LoadAmount(2), &[]);
+    let __sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
+    let __tx_add_input    = b.append(
+        Operation::BuildTxAddInput,
+        &[channel_id, __serial_id_input, __prevtx, __prevtx_vout, __sequence],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_input]);
+    b.append(Operation::RecvTxAddInput, &[]);
 
     let tx_complete = b.append(Operation::BuildTxComplete, &[channel_id]);
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
 
+    // Send a cryptographically valid commitment_signed so CLN proceeds past
+    // validation and the channel reaches the lock-in / shutdown path.
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(Operation::BuildTxSignatures, &[channel_id, their_txid, witnesses]);
     b.append(Operation::SendMessage, &[tx_sigs]);
 
     // shutdown ↔ shutdown
-    let scriptpubkey = b.append(Operation::LoadBytes(vec![]), &[]);
+    // Valid P2WPKH script (0x00 0x14 || 20-byte hash) — empty/random bytes
+    // are rejected by CLN with "Bad shutdown scriptpubkey", which leaves the
+    // dualopend daemon in DUALOPEND_AWAITING_LOCKIN and blocks lightningd
+    // shutdown later in the test run.
+    let scriptpubkey = b.append(
+        Operation::LoadBytes(vec![
+            0x00, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]),
+        &[],
+    );
     let shutdown = b.append(Operation::BuildShutdown, &[channel_id, scriptpubkey]);
     b.append(Operation::SendMessage, &[shutdown]);
-    let _peer_script = b.append(Operation::RecvShutdown, &[]);
+    let their_shutdown_spk = b.append(Operation::RecvShutdown, &[]);
 
-    // closing_signed: propose a fee, send signature placeholder, then receive
-    // CLN's counter-fee (drives handle_peer_closing_signed).
-    let fee_satoshis = b.append(Operation::LoadAmount(500), &[]);
-    let signature    = b.append(Operation::LoadBytes(vec![0u8; 64]), &[]); // executor falls back to a valid sig
+    // closing_signed: cryptographically valid signature over the actual
+    // close_tx so CLN's `handle_peer_closing_signed` proceeds past the
+    // signature-validation gate (otherwise it falls back to a trimmed
+    // close_tx that fails the dust-limit check and never enters the
+    // fee-negotiation loop).  Their balance comes from accept_channel2
+    // rather than a hardcoded 0 so the seed still signs correctly if
+    // CLN's funder policy ever produces a nonzero contribution.
+    let fee_satoshis = b.append(Operation::LoadAmount(1_000), &[]);
     let closing_signed = b.append(
-        Operation::BuildClosingSigned,
-        &[channel_id, fee_satoshis, signature],
+        Operation::BuildSignedClosingSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            scriptpubkey,
+            their_shutdown_spk,
+            funding_sats,
+            __their_fsats,
+            dust_limit,
+            fee_satoshis,
+        ],
     );
     b.append(Operation::SendMessage, &[closing_signed]);
     let _peer_fee = b.append(Operation::RecvClosingSigned, &[]);
@@ -288,7 +513,7 @@ fn generate_close(rng: &mut impl rand::Rng) -> Vec<u8> {
 fn generate_rbf(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -300,7 +525,9 @@ fn generate_rbf(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id     = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate      = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    let funding_sats        = b.append(Operation::LoadAmount(0), &[]);
+    // 500k contribution backed by 1M fuzzer UTXO; CLN aborts the open with
+    // "Insufficiently funded funding tx" if our inputs can't cover our outputs.
+    let funding_sats        = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit          = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight   = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min            = b.append(Operation::LoadAmount(1), &[]);
@@ -324,24 +551,102 @@ fn generate_rbf(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
+
+    // Extract their funding_pubkey + funding_satoshis to construct the
+    // canonical 2-of-2 funding output.  CLN's find_funding_output
+    // (openingd/dualopend.c:2776-2814) aborts the open with
+    //   "Expected output ... not found on funding tx"
+    // if no PSBT output matches scriptpubkey_p2wsh(redeem_2of2(our_fpk, their_fpk)).
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // tx_add_input (real fuzzer UTXO, serial_id=2 = even initiator parity)
+    let __prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
+    let __prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
+    let __serial_id_input = b.append(Operation::LoadAmount(2), &[]);
+    let __sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
+    let __tx_add_input    = b.append(
+        Operation::BuildTxAddInput,
+        &[channel_id, __serial_id_input, __prevtx, __prevtx_vout, __sequence],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_input]);
+    b.append(Operation::RecvTxAddInput, &[]);
 
     // First interactive-tx round: just tx_complete on both sides.
     let tx_complete = b.append(Operation::BuildTxComplete, &[channel_id]);
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
 
+    // Send a cryptographically valid commitment_signed (BIP 143 sighash over the
+    // reconstructed funding tx) so CLN proceeds to send tx_signatures.
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(Operation::BuildTxSignatures, &[channel_id, their_txid, witnesses]);
     b.append(Operation::SendMessage, &[tx_sigs]);
 
@@ -363,8 +668,31 @@ fn generate_rbf(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[tx_complete2]);
     b.append(Operation::RecvTxComplete, &[]);
 
+    // Cryptographically valid commitment_signed for the RBF round.
+    let __our_cs2 = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs2]);
+
     let their_txid2 = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses2  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses2  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs2    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid2, witnesses2],
@@ -386,7 +714,7 @@ fn generate_rbf(rng: &mut impl rand::Rng) -> Vec<u8> {
 fn generate_with_output(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -398,8 +726,8 @@ fn generate_with_output(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id    = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate    = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    // Zero direct bitcoin contribution — we only send a change output.
-    let funding_sats       = b.append(Operation::LoadAmount(0), &[]);
+    // 500k contribution backed by 1M fuzzer UTXO (covers funding + change + fees).
+    let funding_sats       = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit         = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight  = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min           = b.append(Operation::LoadAmount(1), &[]);
@@ -423,16 +751,67 @@ fn generate_with_output(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
+
+    // Extract their funding_pubkey + funding_satoshis to construct the
+    // canonical 2-of-2 funding output that CLN's find_funding_output expects.
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // tx_add_input (real fuzzer UTXO, serial_id=2 = even initiator parity)
+    let __prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
+    let __prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
+    let __serial_id_input = b.append(Operation::LoadAmount(2), &[]);
+    let __sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
+    let __tx_add_input    = b.append(
+        Operation::BuildTxAddInput,
+        &[channel_id, __serial_id_input, __prevtx, __prevtx_vout, __sequence],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_input]);
+    b.append(Operation::RecvTxAddInput, &[]);
 
     // ── tx_add_output: declare a P2WPKH change output ────────────────────────
     //
@@ -464,8 +843,31 @@ fn generate_with_output(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
 
+    // Cryptographically valid commitment_signed.
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid, witnesses],
@@ -487,7 +889,7 @@ fn generate_with_output(rng: &mut impl rand::Rng) -> Vec<u8> {
 fn generate_remove(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -524,25 +926,62 @@ fn generate_remove(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
+
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
 
     // ── tx_add_input → tx_remove_input ───────────────────────────────────────
     //
-    // Send a real input (serial_id = 0, even = initiator) backed by a context
+    // Send a real input (serial_id = 2, even = initiator) backed by a context
     // UTXO so CLN's prevtx validation passes.  Immediately remove it — the net
-    // result is zero contribution from our side, exercising the remove path.
+    // result is just the funding output we already added.
     let prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
     let prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
-    let serial_id_in    = b.append(Operation::LoadAmount(0), &[]);
+    let serial_id_in    = b.append(Operation::LoadAmount(2), &[]);
     let sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
     let tx_add_input = b.append(
         Operation::BuildTxAddInput,
@@ -558,7 +997,7 @@ fn generate_remove(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[tx_remove_input]);
 
     // ── tx_add_output → tx_remove_output ─────────────────────────────────────
-    let serial_id_out = b.append(Operation::LoadAmount(2), &[]);
+    let serial_id_out = b.append(Operation::LoadAmount(4), &[]);
     let output_sats   = b.append(Operation::LoadAmount(100_000), &[]);
     let script = b.append(
         Operation::LoadBytes({
@@ -585,8 +1024,31 @@ fn generate_remove(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
 
+    // Cryptographically valid commitment_signed.
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid, witnesses],
@@ -608,7 +1070,7 @@ fn generate_remove(rng: &mut impl rand::Rng) -> Vec<u8> {
 fn generate_close_multi(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -620,7 +1082,9 @@ fn generate_close_multi(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id    = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate    = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    let funding_sats       = b.append(Operation::LoadAmount(0), &[]);
+    // 500k contribution backed by 1M fuzzer UTXO; CLN aborts the open with
+    // "Insufficiently funded funding tx" when our inputs can't cover our outputs.
+    let funding_sats       = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit         = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight  = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min           = b.append(Operation::LoadAmount(1), &[]);
@@ -644,24 +1108,101 @@ fn generate_close_multi(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
 
-    // tx_complete (zero contribution).
+    // Extract their funding_pubkey + funding_satoshis to construct the
+    // canonical 2-of-2 funding output.  CLN's find_funding_output
+    // (openingd/dualopend.c:2776-2814) aborts the open with
+    //   "Expected output ... not found on funding tx"
+    // if no PSBT output matches scriptpubkey_p2wsh(redeem_2of2(our_fpk, their_fpk)).
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // tx_add_input (real fuzzer UTXO, serial_id=2 = even initiator parity)
+    let __prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
+    let __prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
+    let __serial_id_input = b.append(Operation::LoadAmount(2), &[]);
+    let __sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
+    let __tx_add_input    = b.append(
+        Operation::BuildTxAddInput,
+        &[channel_id, __serial_id_input, __prevtx, __prevtx_vout, __sequence],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_input]);
+    b.append(Operation::RecvTxAddInput, &[]);
+
+    // tx_complete (after our input + funding output contribution).
     let tx_complete = b.append(Operation::BuildTxComplete, &[channel_id]);
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
 
+    // Cryptographically valid commitment_signed.
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid, witnesses],
@@ -669,35 +1210,59 @@ fn generate_close_multi(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[tx_sigs]);
 
     // shutdown ↔ shutdown.
-    let scriptpubkey = b.append(Operation::LoadBytes(vec![]), &[]);
+    // Valid P2WPKH script (0x00 0x14 || 20-byte hash) — empty/random bytes
+    // are rejected by CLN with "Bad shutdown scriptpubkey", which leaves the
+    // dualopend daemon in DUALOPEND_AWAITING_LOCKIN and blocks lightningd
+    // shutdown later in the test run.
+    let scriptpubkey = b.append(
+        Operation::LoadBytes(vec![
+            0x00, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]),
+        &[],
+    );
     let shutdown = b.append(Operation::BuildShutdown, &[channel_id, scriptpubkey]);
     b.append(Operation::SendMessage, &[shutdown]);
-    let _peer_script = b.append(Operation::RecvShutdown, &[]);
+    let their_shutdown_spk = b.append(Operation::RecvShutdown, &[]);
 
     // ── closing_signed: three escalating fee rounds ───────────────────────────
     //
     // CLN's closing_fee_negotiation (closingd.c) does a binary search / accept-
     // in-range check.  Sending fees that bracket CLN's acceptable range forces
-    // the convergence loop to execute multiple iterations.
-    //
+    // the convergence loop to execute multiple iterations.  Each round is
+    // signed against the actual close_tx so CLN doesn't bail out on a bad
+    // signature before the negotiation can iterate.
+    let build_signed = |b: &mut ProgramBuilder, fee: usize| -> usize {
+        b.append(
+            Operation::BuildSignedClosingSigned,
+            &[
+                channel_id,
+                funding_privkey,
+                __their_fpk,
+                scriptpubkey,
+                their_shutdown_spk,
+                funding_sats,
+                __their_fsats,
+                dust_limit,
+                fee,
+            ],
+        )
+    };
+
     // Round 1 — low offer; CLN will counter-propose a higher fee.
     let fee1 = b.append(Operation::LoadAmount(300), &[]);
-    let sig1  = b.append(Operation::LoadBytes(vec![0u8; 64]), &[]);
-    let cs1   = b.append(Operation::BuildClosingSigned, &[channel_id, fee1, sig1]);
+    let cs1  = build_signed(&mut b, fee1);
     b.append(Operation::SendMessage, &[cs1]);
     let _peer_fee1 = b.append(Operation::RecvClosingSigned, &[]);
 
     // Round 2 — mid offer; CLN narrows its range.
     let fee2 = b.append(Operation::LoadAmount(600), &[]);
-    let sig2  = b.append(Operation::LoadBytes(vec![0u8; 64]), &[]);
-    let cs2   = b.append(Operation::BuildClosingSigned, &[channel_id, fee2, sig2]);
+    let cs2  = build_signed(&mut b, fee2);
     b.append(Operation::SendMessage, &[cs2]);
     let _peer_fee2 = b.append(Operation::RecvClosingSigned, &[]);
 
     // Round 3 — higher offer; should be within CLN's acceptable range.
     let fee3 = b.append(Operation::LoadAmount(1_200), &[]);
-    let sig3  = b.append(Operation::LoadBytes(vec![0u8; 64]), &[]);
-    let cs3   = b.append(Operation::BuildClosingSigned, &[channel_id, fee3, sig3]);
+    let cs3  = build_signed(&mut b, fee3);
     b.append(Operation::SendMessage, &[cs3]);
     let _peer_fee3 = b.append(Operation::RecvClosingSigned, &[]);
 
@@ -721,7 +1286,7 @@ fn generate_close_multi(rng: &mut impl rand::Rng) -> Vec<u8> {
 fn generate_reestablish(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -733,7 +1298,7 @@ fn generate_reestablish(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id    = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate    = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    let funding_sats       = b.append(Operation::LoadAmount(0), &[]);
+    let funding_sats       = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit         = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight  = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min           = b.append(Operation::LoadAmount(1), &[]);
@@ -757,23 +1322,100 @@ fn generate_reestablish(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
 
-    // tx_complete → tx_signatures (zero contribution).
+    // Extract their funding_pubkey + funding_satoshis to construct the
+    // canonical 2-of-2 funding output.  CLN's find_funding_output
+    // (openingd/dualopend.c:2776-2814) aborts the open with
+    //   "Expected output ... not found on funding tx"
+    // if no PSBT output matches scriptpubkey_p2wsh(redeem_2of2(our_fpk, their_fpk)).
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // tx_add_input (real fuzzer UTXO, serial_id=2 = even initiator parity)
+    let __prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
+    let __prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
+    let __serial_id_input = b.append(Operation::LoadAmount(2), &[]);
+    let __sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
+    let __tx_add_input    = b.append(
+        Operation::BuildTxAddInput,
+        &[channel_id, __serial_id_input, __prevtx, __prevtx_vout, __sequence],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_input]);
+    b.append(Operation::RecvTxAddInput, &[]);
+
+    // tx_complete → tx_signatures (after our input + funding output contribution).
     let tx_complete = b.append(Operation::BuildTxComplete, &[channel_id]);
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
+    // Cryptographically valid commitment_signed.
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid, witnesses],
@@ -811,7 +1453,7 @@ fn generate_reestablish(rng: &mut impl rand::Rng) -> Vec<u8> {
 fn generate_upfront_shutdown(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -823,7 +1465,7 @@ fn generate_upfront_shutdown(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id    = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate    = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    let funding_sats       = b.append(Operation::LoadAmount(0), &[]);
+    let funding_sats       = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit         = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight  = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min           = b.append(Operation::LoadAmount(1), &[]);
@@ -853,23 +1495,100 @@ fn generate_upfront_shutdown(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
 
-    // tx_complete → tx_signatures (zero contribution).
+    // Extract their funding_pubkey + funding_satoshis to construct the
+    // canonical 2-of-2 funding output.  CLN's find_funding_output
+    // (openingd/dualopend.c:2776-2814) aborts the open with
+    //   "Expected output ... not found on funding tx"
+    // if no PSBT output matches scriptpubkey_p2wsh(redeem_2of2(our_fpk, their_fpk)).
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // tx_add_input (real fuzzer UTXO, serial_id=2 = even initiator parity)
+    let __prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
+    let __prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
+    let __serial_id_input = b.append(Operation::LoadAmount(2), &[]);
+    let __sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
+    let __tx_add_input    = b.append(
+        Operation::BuildTxAddInput,
+        &[channel_id, __serial_id_input, __prevtx, __prevtx_vout, __sequence],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_input]);
+    b.append(Operation::RecvTxAddInput, &[]);
+
+    // tx_complete → tx_signatures (after our input + funding output contribution).
     let tx_complete = b.append(Operation::BuildTxComplete, &[channel_id]);
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
+    // Cryptographically valid commitment_signed.
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid, witnesses],
@@ -929,16 +1648,17 @@ fn generate_wrong_parity(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
 
     // ── tx_add_input with ODD serial_id = 1 (wrong parity for initiator) ─────
     //
@@ -972,7 +1692,7 @@ fn generate_wrong_parity(rng: &mut impl rand::Rng) -> Vec<u8> {
 fn generate_rbf_confirmed(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -984,7 +1704,7 @@ fn generate_rbf_confirmed(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id    = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate    = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    let funding_sats       = b.append(Operation::LoadAmount(0), &[]);
+    let funding_sats       = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit         = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight  = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min           = b.append(Operation::LoadAmount(1), &[]);
@@ -1008,23 +1728,95 @@ fn generate_rbf_confirmed(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
 
-    // tx_complete → tx_signatures (zero contribution).
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // tx_add_input (real fuzzer UTXO, serial_id=2 = even initiator parity)
+    let __prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
+    let __prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
+    let __serial_id_input = b.append(Operation::LoadAmount(2), &[]);
+    let __sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
+    let __tx_add_input    = b.append(
+        Operation::BuildTxAddInput,
+        &[channel_id, __serial_id_input, __prevtx, __prevtx_vout, __sequence],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_input]);
+    b.append(Operation::RecvTxAddInput, &[]);
+
+    // tx_complete → tx_signatures (after our input + funding output contribution).
     let tx_complete = b.append(Operation::BuildTxComplete, &[channel_id]);
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
+    // Cryptographically valid commitment_signed.
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid, witnesses],
@@ -1052,8 +1844,31 @@ fn generate_rbf_confirmed(rng: &mut impl rand::Rng) -> Vec<u8> {
     b.append(Operation::SendMessage, &[tx_complete2]);
     b.append(Operation::RecvTxComplete, &[]);
 
+    // Cryptographically valid commitment_signed for the RBF round.
+    let __our_cs2 = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs2]);
+
     let their_txid2 = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses2  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses2  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs2    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid2, witnesses2],
@@ -1080,7 +1895,7 @@ fn generate_rbf_confirmed(rng: &mut impl rand::Rng) -> Vec<u8> {
 fn generate_channel_type_static_only(rng: &mut impl rand::Rng) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -1092,7 +1907,7 @@ fn generate_channel_type_static_only(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id    = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate    = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    let funding_sats       = b.append(Operation::LoadAmount(0), &[]);
+    let funding_sats       = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit         = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight  = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min           = b.append(Operation::LoadAmount(1), &[]);
@@ -1119,22 +1934,84 @@ fn generate_channel_type_static_only(rng: &mut impl rand::Rng) -> Vec<u8> {
     // CLN may reject or accept this channel type — RecvAcceptChannel2 drains
     // the response (RecvTxAbort is handled upstream if CLN rejects).
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
+
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
 
     let tx_complete = b.append(Operation::BuildTxComplete, &[channel_id]);
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
+    // Cryptographically valid commitment_signed (anchor-format sig — CLN may
+    // reject for the static-only channel type, but the wire-parse path is
+    // exercised either way).
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid, witnesses],
@@ -1158,7 +2035,7 @@ fn generate_channel_type_static_only(rng: &mut impl rand::Rng) -> Vec<u8> {
 fn generate_contribution_variants(rng: &mut impl rand::Rng, contribution_sats: i64) -> Vec<u8> {
     let mut b = ProgramBuilder::new();
 
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -1194,23 +2071,95 @@ fn generate_contribution_variants(rng: &mut impl rand::Rng, contribution_sats: i
     b.append(Operation::SendMessage, &[open_ch2]);
 
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
+
+    let __their_fpk = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let __their_fsats = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let __funding_script = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, __their_fpk],
+    );
+    let __total_funding = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, __their_fsats],
+    );
+    let __funding_serial = b.append(Operation::LoadAmount(0), &[]);
+    let __tx_add_funding = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, __funding_serial, __total_funding, __funding_script],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_funding]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // We declared 1M sat contribution above, so CLN expects a real input from us.
+    let __prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
+    let __prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
+    let __serial_id_input = b.append(Operation::LoadAmount(2), &[]);
+    let __sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]);
+    let __tx_add_input    = b.append(
+        Operation::BuildTxAddInput,
+        &[channel_id, __serial_id_input, __prevtx, __prevtx_vout, __sequence],
+    );
+    b.append(Operation::SendMessage, &[__tx_add_input]);
+    b.append(Operation::RecvTxAddInput, &[]);
 
     // First tx round (minimal: just tx_complete).
     let tx_complete = b.append(Operation::BuildTxComplete, &[channel_id]);
     b.append(Operation::SendMessage, &[tx_complete]);
     b.append(Operation::RecvTxComplete, &[]);
+    // Cryptographically valid commitment_signed.
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid, witnesses],
@@ -1236,8 +2185,31 @@ fn generate_contribution_variants(rng: &mut impl rand::Rng, contribution_sats: i
     b.append(Operation::SendMessage, &[tx_complete2]);
     b.append(Operation::RecvTxComplete, &[]);
 
+    // Cryptographically valid commitment_signed for the RBF round.
+    let __our_cs2 = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            __their_fpk,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            __their_fsats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs2]);
+
     let their_txid2 = b.append(Operation::RecvTxSignatures, &[]);
-    let witnesses2  = b.append(Operation::LoadBytes(vec![]), &[]);
+    let witnesses2  = b.append(Operation::ComputeFundingWitness, &[]);
     let tx_sigs2    = b.append(
         Operation::BuildTxSignatures,
         &[channel_id, their_txid2, witnesses2],
@@ -1288,7 +2260,7 @@ fn generate_valid(rng: &mut impl rand::Rng) -> Vec<u8> {
     // CLN recomputes temporary_channel_id from the basepoints in open_channel2
     // and rejects if it doesn't match.  Formula (CLN common/channel_id.c):
     //   temp_channel_id = SHA256(zeros[33] || revocation_basepoint[33])
-    let funding_pubkey              = b.generate_fresh(VariableType::Point, rng);
+    let (funding_privkey, funding_pubkey) = b.generate_fresh_keypair(rng);
     let revocation_basepoint        = b.generate_fresh(VariableType::Point, rng);
     let payment_basepoint           = b.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint   = b.generate_fresh(VariableType::Point, rng);
@@ -1301,9 +2273,12 @@ fn generate_valid(rng: &mut impl rand::Rng) -> Vec<u8> {
     let temp_channel_id     = b.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
     let funding_feerate     = b.append(Operation::LoadFeeratePerKw(1000), &[]);
     let commit_feerate      = b.append(Operation::LoadFeeratePerKw(1000), &[]);
-    // We declare 1,000,000 sats as our contribution.  We back this up with a
-    // real tx_add_input from the fuzzer UTXO (loaded from context at runtime).
-    let funding_sats        = b.append(Operation::LoadAmount(1_000_000), &[]);
+    // We declare 500,000 sats as our contribution.  Backed by a real
+    // tx_add_input from the fuzzer UTXO (1,000,000 sats), leaving the
+    // remaining 500,000 sats as implicit fee budget.  CLN computes the
+    // initiator fee as funding_tx_weight * funding_feerate / 1000, which
+    // for the typical interactive-tx weight is well under 100,000 sats.
+    let funding_sats        = b.append(Operation::LoadAmount(500_000), &[]);
     let dust_limit          = b.append(Operation::LoadAmount(546), &[]);
     let max_htlc_inflight   = b.append(Operation::LoadAmount(990_000_000), &[]);
     let htlc_min            = b.append(Operation::LoadAmount(1), &[]);
@@ -1328,38 +2303,78 @@ fn generate_valid(rng: &mut impl rand::Rng) -> Vec<u8> {
     ]);
     b.append(Operation::SendMessage, &[open_ch2]);
 
-    // ── Phase 2: accept_channel2 → compute full channel_id ───────────────────
+    // ── Phase 2: accept_channel2 → derive funding params ─────────────────────
     let accept = b.append(Operation::RecvAcceptChannel2, &[]);
-    let _their_rev = b.append(
+    let their_rev = b.append(
         Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
         &[accept],
     );
-    // CLN keeps state->channel_id = temporary_channel_id throughout the entire
-    // interactive-tx phase (tx_add_input, tx_add_output, tx_complete, tx_abort,
-    // tx_signatures).  Using ComputeChannelIdV2 (SHA256 of sorted rev basepoints)
-    // causes check_channel_id() in dualopend.c to fail BEFORE any interactivetx.c
-    // function is entered.
-    let channel_id = temp_channel_id;
+    let their_pay = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::PaymentBasepoint),
+        &[accept],
+    );
+    let their_delayed = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::DelayedPaymentBasepoint),
+        &[accept],
+    );
+    let their_first_pcp = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FirstPerCommitmentPoint),
+        &[accept],
+    );
+    // CLN derives state->channel_id = SHA256(min(rev_a, rev_b) || max(rev_a, rev_b))
+    // immediately after constructing accept_channel2 (dualopend.c:2735), then
+    // check_channel_id() validates every subsequent tx_* message against it.
+    let channel_id = b.append(
+        Operation::ComputeChannelIdV2,
+        &[revocation_basepoint, their_rev],
+    );
 
-    // ── Phase 3: tx_add_input with our real UTXO ─────────────────────────────
+    // Extract their funding_pubkey + funding_satoshis to construct the
+    // canonical 2-of-2 funding output.  CLN's find_funding_output (in
+    // openingd/dualopend.c:2776-2814) computes
+    //   scriptpubkey_p2wsh(bitcoin_redeem_2of2(our_fpk, their_fpk))
+    // and aborts the open with "Expected output ... not found on funding tx"
+    // if the PSBT has no output matching that scriptpubkey.
+    let their_funding_pubkey    = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingPubkey),
+        &[accept],
+    );
+    let their_funding_sats      = b.append(
+        Operation::ExtractAcceptChannel2(AcceptChannel2Field::FundingSatoshis),
+        &[accept],
+    );
+    let funding_script          = b.append(
+        Operation::ComputeFundingScriptP2WSH,
+        &[funding_pubkey, their_funding_pubkey],
+    );
+    let total_funding           = b.append(
+        Operation::AddAmounts,
+        &[funding_sats, their_funding_sats],
+    );
+
+    // ── Phase 3a: tx_add_output (canonical funding output, serial_id=0) ──────
+    let funding_serial_id       = b.append(Operation::LoadAmount(0), &[]);
+    let tx_add_funding_output   = b.append(
+        Operation::BuildTxAddOutput,
+        &[channel_id, funding_serial_id, total_funding, funding_script],
+    );
+    b.append(Operation::SendMessage, &[tx_add_funding_output]);
+    b.append(Operation::RecvTxAddOutput, &[]);
+
+    // ── Phase 3b: tx_add_input with our real UTXO (serial_id=2) ──────────────
     //
     // LoadFundingUtxoRawTx(0) returns ProgramContext.funding_utxos[0].raw_tx —
-    // the serialized previous transaction.  This is the `prevtx` field that
-    // CLN validates (it decodes the tx and checks the output exists).
-    //
-    // LoadFundingUtxoVout(0) returns the output index within that tx.
-    // Serial ID 0 = even (initiator rule, BOLT 2).
+    // the serialized previous transaction.  CLN decodes it and checks the
+    // output exists.  Serial 2 = even (initiator parity, BOLT 2).
     let prevtx          = b.append(Operation::LoadFundingUtxoRawTx(0), &[]);
     let prevtx_vout     = b.append(Operation::LoadFundingUtxoVout(0), &[]);
-    let serial_id_input = b.append(Operation::LoadAmount(0), &[]); // serial_id = 0 (even)
+    let serial_id_input = b.append(Operation::LoadAmount(2), &[]); // serial_id = 2 (even)
     let sequence        = b.append(Operation::LoadBlockHeight(0xffff_fffd), &[]); // RBF-enabled
     let tx_add_input = b.append(
         Operation::BuildTxAddInput,
         &[channel_id, serial_id_input, prevtx, prevtx_vout, sequence],
     );
     b.append(Operation::SendMessage, &[tx_add_input]);
-    // Receive CLN's corresponding interactive-tx message (CLN may send
-    // tx_add_input or tx_add_output in response; RecvTxAddInput drains one).
     b.append(Operation::RecvTxAddInput, &[]);
 
     // ── Phase 4: tx_complete (we are done adding) ─────────────────────────────
@@ -1379,6 +2394,30 @@ fn generate_valid(rng: &mut impl rand::Rng) -> Vec<u8> {
     // extract the real txid of the negotiated funding transaction.
     // If we have the lower pubkey, RecvTxSignatures returns zeros — we still
     // send tx_signatures, triggering handle_tx_sigs for validation.
+    // Cryptographically valid commitment_signed (BIP 143 sighash over the
+    // BOLT 2-sorted funding tx).
+    let __our_cs = b.append(
+        Operation::BuildSignedCommitmentSigned,
+        &[
+            channel_id,
+            funding_privkey,
+            their_funding_pubkey,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            their_rev,
+            their_pay,
+            their_delayed,
+            their_first_pcp,
+            to_self_delay,
+            commit_feerate,
+            dust_limit,
+            funding_sats,
+            their_funding_sats,
+        ],
+    );
+    b.append(Operation::SendMessage, &[__our_cs]);
+
     let their_txid = b.append(Operation::RecvTxSignatures, &[]);
 
     // ── Phase 6: compute real BIP 143 P2WPKH witness ─────────────────────────
