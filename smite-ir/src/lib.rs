@@ -17,7 +17,10 @@ pub mod variable;
 pub use builder::ProgramBuilder;
 pub use context::ProgramContext;
 pub use executor::{Executor, ExecutorError};
-pub use generators::{Generator, InteractiveTxGenerator, OpenChannelGenerator};
+pub use generators::{
+    Generator, InteractiveTxGenerator, InteractiveTxSetup, InteractiveTxSetupOutputs,
+    OpenChannelGenerator,
+};
 pub use instruction::Instruction;
 pub use operation::Operation;
 pub use program::Program;

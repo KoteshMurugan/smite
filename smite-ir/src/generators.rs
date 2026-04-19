@@ -6,9 +6,11 @@
 //! `ProgramBuilder`.
 
 mod interactive_tx;
+mod interactive_tx_setup;
 mod open_channel;
 
 pub use interactive_tx::InteractiveTxGenerator;
+pub use interactive_tx_setup::{InteractiveTxSetup, InteractiveTxSetupOutputs};
 pub use open_channel::OpenChannelGenerator;
 
 use rand::Rng;
