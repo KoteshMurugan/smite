@@ -1,1 +1,19 @@
 target/
+
+# macOS metadata
+.DS_Store
+
+# Editor / agent state
+.claude/
+.idea/
+.vscode/
+
+# Local fuzzing artifacts (binary inputs, coverage HTML — too large for git)
+corpus/
+findings/
+cln-coverage-report/
+
+# Build outputs
+*.o
+*.a
+*.so.*
