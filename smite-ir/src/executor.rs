@@ -842,7 +842,10 @@ impl<'a> Executor<'a> {
             // --- Build dual funding messages ---
             Operation::BuildTxAddInput => {
                 let channel_id = self.get_channel_id(inputs[0])?;
-                let serial_id = self.get_amount(inputs[1])?;
+                // BOLT 2: opener serial_ids must be even. AFL mutates the
+                // wire-encoded LoadAmount value freely, so mask the LSB here
+                // to keep the parity invariant after mutation.
+                let serial_id = self.get_amount(inputs[1])? & !1u64;
                 let prevtx = self.get_bytes(inputs[2])?;
                 let prevtx_vout = self.get_block_height(inputs[3])?;
                 let sequence = self.get_block_height(inputs[4])?;
@@ -874,7 +877,7 @@ impl<'a> Executor<'a> {
 
             Operation::BuildTxAddOutput => {
                 let channel_id = self.get_channel_id(inputs[0])?;
-                let serial_id = self.get_amount(inputs[1])?;
+                let serial_id = self.get_amount(inputs[1])? & !1u64;
                 let sats = self.get_amount(inputs[2])?;
                 let script = self.get_bytes(inputs[3])?;
 
@@ -888,7 +891,7 @@ impl<'a> Executor<'a> {
 
             Operation::BuildTxRemoveInput => {
                 let channel_id = self.get_channel_id(inputs[0])?;
-                let serial_id = self.get_amount(inputs[1])?;
+                let serial_id = self.get_amount(inputs[1])? & !1u64;
                 self.itx_inputs.retain(|i| i.serial_id != serial_id);
                 let msg = TxRemoveInput { channel_id, serial_id };
                 Ok(Some(Variable::Message(Message::TxRemoveInput(msg).encode())))
@@ -896,7 +899,7 @@ impl<'a> Executor<'a> {
 
             Operation::BuildTxRemoveOutput => {
                 let channel_id = self.get_channel_id(inputs[0])?;
-                let serial_id = self.get_amount(inputs[1])?;
+                let serial_id = self.get_amount(inputs[1])? & !1u64;
                 self.itx_outputs.retain(|o| o.serial_id != serial_id);
                 let msg = TxRemoveOutput { channel_id, serial_id };
                 Ok(Some(Variable::Message(Message::TxRemoveOutput(msg).encode())))
