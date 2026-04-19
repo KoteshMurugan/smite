@@ -53,6 +53,7 @@
 
 use rand::{Rng, RngExt};
 
+use super::interactive_tx_setup::InteractiveTxSetup;
 use super::Generator;
 use crate::builder::ProgramBuilder;
 use crate::operation::Operation;
@@ -75,79 +76,17 @@ pub struct InteractiveTxGenerator;
 
 impl Generator for InteractiveTxGenerator {
     fn generate(&self, builder: &mut ProgramBuilder, rng: &mut impl Rng) {
-        // ── Phase 1: open_channel2 ──────────────────────────────────────────
+        // ── Phases 1 & 2: open_channel2 / accept_channel2 handshake ─────────
+        //
+        // Delegated to the InteractiveTxSetup primitive so future flows
+        // (splice, RBF-restart, channel_ready) can share this prefix.
+        let setup = InteractiveTxSetup.emit(builder, rng);
 
-        // Each public key is generated fresh to guarantee cryptographic
-        // distinctness; the executor will derive valid secp256k1 points.
-        let funding_pubkey = builder.generate_fresh(VariableType::Point, rng);
-        let revocation_basepoint = builder.generate_fresh(VariableType::Point, rng);
-        let payment_basepoint = builder.generate_fresh(VariableType::Point, rng);
-        let delayed_payment_basepoint = builder.generate_fresh(VariableType::Point, rng);
-        let htlc_basepoint = builder.generate_fresh(VariableType::Point, rng);
-        let first_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
-        let second_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
-
-        // Protocol parameters — reuse from pool where possible (75% chance) to
-        // exercise variable-reuse fuzzing paths, or generate fresh (25%).
-        let chain_hash = builder.pick_variable(VariableType::ChainHash, rng);
-        // The temporary_channel_id MUST be SHA256(zeros[33] || revocation_basepoint[33])
-        // per BOLT 2 dual-funding spec (CLN validates this in common/channel_id.c).
-        // Using a random value here causes CLN to reject open_channel2, preventing
-        // any interactive-tx messages from being processed.
-        let temporary_channel_id =
-            builder.append(Operation::ComputeTempChannelIdV2, &[revocation_basepoint]);
-        let funding_feerate_perkw = builder.pick_variable(VariableType::FeeratePerKw, rng);
-        let commitment_feerate_perkw = builder.pick_variable(VariableType::FeeratePerKw, rng);
-        let funding_satoshis = builder.pick_variable(VariableType::Amount, rng);
-        let dust_limit_satoshis = builder.pick_variable(VariableType::Amount, rng);
-        let max_htlc_value_in_flight_msat = builder.pick_variable(VariableType::Amount, rng);
-        let htlc_minimum_msat = builder.pick_variable(VariableType::Amount, rng);
-        let to_self_delay = builder.pick_variable(VariableType::U16, rng);
-        let max_accepted_htlcs = builder.pick_variable(VariableType::U16, rng);
-        let locktime = builder.pick_variable(VariableType::BlockHeight, rng);
-        let channel_flags = builder.pick_variable(VariableType::U8, rng);
-        let upfront_shutdown_script = builder.pick_variable(VariableType::Bytes, rng);
-        let channel_type = builder.pick_variable(VariableType::Features, rng);
-
-        let open_ch2_msg = builder.append(
-            Operation::BuildOpenChannel2,
-            &[
-                chain_hash,
-                temporary_channel_id,
-                funding_feerate_perkw,
-                commitment_feerate_perkw,
-                funding_satoshis,
-                dust_limit_satoshis,
-                max_htlc_value_in_flight_msat,
-                htlc_minimum_msat,
-                to_self_delay,
-                max_accepted_htlcs,
-                locktime,
-                funding_pubkey,
-                revocation_basepoint,
-                payment_basepoint,
-                delayed_payment_basepoint,
-                htlc_basepoint,
-                first_per_commitment_point,
-                second_per_commitment_point,
-                channel_flags,
-                upfront_shutdown_script,
-                channel_type,
-            ],
-        );
-        builder.append(Operation::SendMessage, &[open_ch2_msg]);
-
-        // ── Phase 2: accept_channel2 ────────────────────────────────────────
-
-        let _accept_ch2 = builder.append(Operation::RecvAcceptChannel2, &[]);
-
-        // Extract the channel ID from the accept_channel2 response.
-        // During the interactive-tx phase (tx_add_input, tx_add_output, tx_complete,
-        // tx_abort, tx_signatures), CLN's dualopend uses state->channel_id which
-        // is set to the temporary_channel_id throughout this phase.  Using the
-        // derived channel_id (ComputeChannelIdV2) causes check_channel_id() to
-        // fail in dualopend before interactivetx.c is ever called.
-        let channel_id = temporary_channel_id;
+        // CLN's dualopend keeps state->channel_id == temporary_channel_id
+        // throughout the interactive-tx phase (until tx_signatures).  Using
+        // the derived ComputeChannelIdV2 here would fail check_channel_id()
+        // before interactivetx.c is ever called.
+        let channel_id = setup.temporary_channel_id;
 
         // ── Phase 3: interactive-tx negotiation ─────────────────────────────
 
