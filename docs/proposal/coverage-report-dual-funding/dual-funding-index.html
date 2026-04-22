@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>CLN Dual-Funding Coverage — Smite SoB 2026</title>
+<link rel="stylesheet" href="style.css">
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;max-width:1100px;margin:2em auto;padding:0 1em;color:#222}
+h1{border-bottom:2px solid #333;padding-bottom:.3em}
+.banner{background:#f5f7fa;border-left:4px solid #2c5;padding:1em;margin:1em 0;border-radius:4px}
+table{border-collapse:collapse;width:100%;margin:1em 0}
+th,td{padding:.5em .8em;text-align:left;border-bottom:1px solid #ddd}
+th{background:#f0f3f7}
+tr:hover{background:#fafbfc}
+.pct-high{color:#0a7;font-weight:600}
+.pct-mid{color:#d80;font-weight:600}
+.pct-low{color:#d33;font-weight:600}
+a{color:#06c;text-decoration:none}
+a:hover{text-decoration:underline}
+.note{font-size:.9em;color:#666;margin-top:.3em}
+.meta{background:#fffbe5;padding:.8em 1em;border-radius:4px;margin:1em 0;font-size:.95em}
+</style></head><body>
+
+<h1>CLN Dual-Funding Coverage — Smite SoB 2026</h1>
+
+<div class="banner">
+This is a <strong>curated subset</strong> of the full LLVM source-coverage
+report, filtered to the <strong>9 source files that are reachable from
+the BOLT 2 interactive-tx (dual-funding) protocol</strong>. The full CLN
+codebase has 529 source files; the rest (gossipd, hsmd, plugins,
+channeld HTLC logic, openingd legacy single-funding, etc.) are
+unreachable from a peer-message harness and are not relevant here.
+</div>
+
+<div class="meta">
+<strong>Campaign:</strong> AFL++ Nyx, KVM-accelerated snapshot fuzzing &middot;
+<strong>Target:</strong> Core Lightning v25.12.1 (with patches 0001–0004) &middot;
+<strong>Machine:</strong> GCP n2-standard-4 (asia-south1-b) &middot;
+<strong>Run time:</strong> ~17.5 hours &middot;
+<strong>Corpus:</strong> 603 inputs &middot;
+<strong>Edges found:</strong> 15,129 &middot;
+<strong>Crashes:</strong> 0 (target patched against the 3 bugs found earlier)
+</div>
+
+<table>
+<thead><tr><th>File</th><th>Function cov</th><th>Line cov</th><th>Region cov</th><th>Branch cov</th></tr></thead>
+<tbody>
+<tr>
+<td><a href="coverage/cln/openingd/dualopend.c.html">openingd/dualopend.c</a><div class="note">Main dual-funding state machine in CLN — ALL interactive-tx logic lives here</div></td>
+<td class="pct-high">65.62% (42/64)</td>
+<td class="pct-mid">43.54% (1267/2910)</td>
+<td class="pct-mid">44.52% (927/2082)</td>
+<td class="pct-mid">41.32% (452/1094)</td>
+</tr>
+<tr>
+<td><a href="coverage/cln/openingd/dualopend_wiregen.c.html">openingd/dualopend_wiregen.c</a><div class="note">Auto-generated codecs for dualopend ↔ lightningd messages</div></td>
+<td class="pct-mid">45.83% (33/72)</td>
+<td class="pct-mid">39.02% (391/1002)</td>
+<td class="pct-mid">33.73% (253/750)</td>
+<td class="pct-mid">28.04% (83/296)</td>
+</tr>
+<tr>
+<td><a href="coverage/cln/openingd/openingd_wiregen.c.html">openingd/openingd_wiregen.c</a><div class="note">Shared opening codecs (single + dual funding)</div></td>
+<td class="pct-low">0.00% (0/26)</td>
+<td class="pct-low">0.00% (0/465)</td>
+<td class="pct-low">0.00% (0/330)</td>
+<td class="pct-low">0.00% (0/126)</td>
+</tr>
+<tr>
+<td><a href="coverage/cln/bitcoin/psbt.c.html">bitcoin/psbt.c</a><div class="note">PSBT manipulation — exercised by every interactive-tx round</div></td>
+<td class="pct-high">69.49% (41/59)</td>
+<td class="pct-mid">53.14% (381/717)</td>
+<td class="pct-mid">32.48% (370/1139)</td>
+<td class="pct-low">24.65% (107/434)</td>
+</tr>
+<tr>
+<td><a href="coverage/cln/common/psbt_open.c.html">common/psbt_open.c</a><div class="note">PSBT helpers specific to dual-funding</div></td>
+<td class="pct-high">64.52% (20/31)</td>
+<td class="pct-high">62.83% (235/374)</td>
+<td class="pct-mid">45.67% (211/462)</td>
+<td class="pct-mid">50.00% (70/140)</td>
+</tr>
+<tr>
+<td><a href="coverage/cln/common/peer_io.c.html">common/peer_io.c</a><div class="note">Read/write peer wire messages — every BOLT 2 message hits this</div></td>
+<td class="pct-high">100.00% (2/2)</td>
+<td class="pct-high">100.00% (11/11)</td>
+<td class="pct-high">100.00% (7/7)</td>
+<td class="pct-high">100.00% (2/2)</td>
+</tr>
+<tr>
+<td><a href="coverage/cln/common/channel_id.c.html">common/channel_id.c</a><div class="note">Channel-id derivation (BOLT 2 §6.1)</div></td>
+<td class="pct-high">71.43% (5/7)</td>
+<td class="pct-high">76.19% (32/42)</td>
+<td class="pct-high">70.37% (19/27)</td>
+<td class="pct-mid">50.00% (2/4)</td>
+</tr>
+<tr>
+<td><a href="coverage/cln/wire/peer_wire.c.html">wire/peer_wire.c</a><div class="note">BOLT 1 wire framing — every peer message</div></td>
+<td class="pct-high">100.00% (5/5)</td>
+<td class="pct-high">81.73% (161/197)</td>
+<td class="pct-high">77.08% (148/192)</td>
+<td class="pct-high">62.35% (207/332)</td>
+</tr>
+<tr>
+<td><a href="coverage/cln/common/interactivetx.c.html">common/interactivetx.c</a><div class="note">Splice-only interactive-tx (channeld); 0% expected — out of scope</div></td>
+<td class="pct-low">0.00% (0/8)</td>
+<td class="pct-low">0.00% (0/556)</td>
+<td class="pct-low">0.00% (0/578)</td>
+<td class="pct-low">0.00% (0/372)</td>
+</tr>
+
+</tbody>
+</table>
+
+<h2>How to read these numbers</h2>
+<ul>
+<li><strong>Green (≥60%)</strong> means the harness is reaching the
+intended code paths well.</li>
+<li><strong>Orange (25-60%)</strong> means partial coverage — the
+remaining lines are either error paths, opener-only branches (CLN
+plays accepter in this scenario), or feature-gated code (lease /
+liquidity ads).</li>
+<li><strong>Red (&lt;25%)</strong> generally indicates code that
+requires a different scenario to reach (e.g. <code>interactivetx.c</code>
+is splice-only; reachable by a future splice scenario).</li>
+</ul>
+
+<h2>What is NOT in this report</h2>
+<p>The full LLVM coverage report covers 529 files at ~5% line coverage
+overall. The other ~520 files (gossipd, hsmd, channeld HTLC code,
+plugins, RPC, etc.) are <em>unreachable</em> from the dual-funding
+peer-message harness by design and are not informative.</p>
+
+<p>Files where the dual-funding harness <em>could</em> push coverage
+higher with additional work (itemised in the proposal timeline):</p>
+<ul>
+<li><code>openingd/dualopend.c</code> currently 43.54%; ceiling
+estimated at ~60-65% with a <em>CLN-as-opener</em> scenario.</li>
+<li><code>common/interactivetx.c</code> currently 0%; reachable only
+via splice scenarios (Phase 6 BOLT 2).</li>
+</ul>
+
+<p style="margin-top:2em;font-size:.85em;color:#888">
+Generated 2026-04-20 from
+<code>/home/surajangurajnaidu/cln-coverage-report2/html/index.html</code>
+(LLVM source-based coverage, <code>llvm-cov show</code> v18).
+</p>
+
+</body></html>
