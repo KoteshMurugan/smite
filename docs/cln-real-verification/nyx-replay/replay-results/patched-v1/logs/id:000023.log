@@ -1,0 +1,20 @@
+INFO  [smite_scenarios::targets::bitcoind] Starting bitcoind...
+INFO  [smite_scenarios::targets::bitcoind] Waiting for bitcoind to be ready...
+INFO  [smite_scenarios::targets::bitcoind] bitcoind is ready
+INFO  [smite_scenarios::targets::cln] Starting lightningd...
+INFO  [smite_scenarios::targets::cln] Waiting for lightningd to be ready and synced...
+INFO  [smite_scenarios::targets::cln] CLN identity pubkey: 0377f2e8e581721207d8ac5c35f80aa1d075fce79cda67ed37a73c0707bfb638e7, blockheight: 71
+INFO  [smite_scenarios::targets::cln] CLN identity pubkey: 0377f2e8e581721207d8ac5c35f80aa1d075fce79cda67ed37a73c0707bfb638e7, blockheight: 101
+INFO  [smite_scenarios::targets::cln] lightningd synced (blockheight=101)
+INFO  [smite_scenarios::targets::cln] CLN deposit address: bcrt1q54jd6egkcrc8nx0v3ycj47yxn7qrrzx7z85evh
+INFO  [smite_scenarios::targets::cln] CLN wallet funded with 1 BTC — dual-funding contributions enabled
+INFO  [smite_scenarios::targets::cln] Fuzzer P2WPKH address: bcrt1qu5g972mhyvln75vratlsl62ze2yh06fmtcexas
+INFO  [smite_scenarios::targets::cln] Fuzzer wallet funded — txid: 45f853667cedd91d4adccb06d81d27d25135d3abcdf9daf842cc1c6ee11130ad
+INFO  [smite_scenarios::targets::cln] Fuzzer UTXO ready: txid=45f853667cedd91d4adccb06d81d27d25135d3abcdf9daf842cc1c6ee11130ad vout=1 amount=1000000sats
+INFO  [smite_scenarios::targets::cln] Fuzzer wallet ready: 1 UTXO(s) for dual-funding
+INFO  [smite_scenarios::targets::cln] Both daemons are running, ready to fuzz
+INFO  [smite_scenarios::scenarios::dual_funding] Loaded 1 fuzzer UTXO(s) for real dual-funding contributions
+INFO  [smite_scenarios::scenarios::dual_funding] DualFundingScenario ready. chain=regtest
+INFO  [smite::scenarios] Scenario initialized! Executing input...
+INFO  [smite::runners] Reading input from "/input.bin"
+INFO  [smite::scenarios] Test case ran successfully!

@@ -73,6 +73,22 @@ RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${B
 RUN git clone --depth 1 --branch ${CLN_VERSION} --recurse-submodules \
     https://github.com/ElementsProject/lightning.git /cln
 WORKDIR /cln
+
+# Apply local CLN bug-fix patches when APPLY_PATCHES=1 is passed at build time.
+# Default (unset / 0) -> vanilla v25.12.1 source -> reproduces the 4 dualopend
+# bugs found by the dual_funding fuzzer.
+# APPLY_PATCHES=1     -> patched build -> same fuzzer no longer crashes.
+ARG APPLY_PATCHES=0
+COPY workloads/cln/patches/ /tmp/cln-patches/
+RUN if [ "$APPLY_PATCHES" = "1" ]; then \
+        for p in /tmp/cln-patches/00*.patch; do \
+            echo "applying $(basename "$p")"; \
+            patch -p1 < "$p" || exit 1; \
+        done; \
+    else \
+        echo "APPLY_PATCHES=0 -> building unpatched CLN (4 known bugs present)"; \
+    fi
+
 RUN pip3 install --break-system-packages mako
 # AFL_UBSAN_VERBOSE=1 gives us helpful UBSan reports instead of simply SIGILL.
 ENV AFL_UBSAN_VERBOSE=1
@@ -88,8 +104,12 @@ COPY smite/ smite/
 COPY smite-scenarios/ smite-scenarios/
 COPY smite-ir/ smite-ir/
 COPY smite-nyx-sys/ smite-nyx-sys/
+# Fetch dependencies separately so the heavy compile step doesn't fight the
+# crates.io network fetch. Retry up to 5 times in case of transient kills.
+RUN for i in 1 2 3 4 5; do cargo fetch && break; echo "fetch attempt $i failed, retrying..."; done
 RUN TARGET_MAP_SIZE=$(cat /tmp/total-map-size) \
-    cargo build -p smite-scenarios --bin cln_${SCENARIO} --release --features nyx
+    CARGO_BUILD_JOBS=1 \
+    cargo build -p smite-scenarios --bin cln_${SCENARIO} --release --features nyx --offline
 
 # Build crash handler shared libraries, LD_PRELOADed into CLN to bypass its
 # blocking crashdump signal handler. Two variants:

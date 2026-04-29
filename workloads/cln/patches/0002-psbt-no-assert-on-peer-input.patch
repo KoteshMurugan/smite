@@ -4,7 +4,7 @@ Subject: [PATCH 2/4] psbt: don't assert on attacker-controlled wally errors
 Crash signature (Nyx, AFL++, dual_funding scenario, CLN v25.12.1):
 
     Assertion `wally_err == WALLY_OK' failed.
-    bitcoin/psbt.c:266 psbt_add_output()
+    bitcoin/psbt.c:268 psbt_add_output()
 
 `psbt_add_tx_output_at()` returns WALLY_EINVAL when the requested insert
 index is out of bounds for the underlying tx. The fuzzer reaches this
@@ -19,16 +19,14 @@ The follow-up patches (0003, 0004) wire NULL handling at the two
 remaining call-sites that previously assumed success.
 
 ---
- bitcoin/psbt.c | 5 +++--
- 1 file changed, 3 insertions(+), 2 deletions(-)
+ bitcoin/psbt.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
 
 diff --git a/bitcoin/psbt.c b/bitcoin/psbt.c
 --- a/bitcoin/psbt.c
 +++ b/bitcoin/psbt.c
-@@ -260,12 +260,13 @@ struct wally_psbt_output *psbt_add_output(struct wally_psbt *psbt,
- 					  size_t insert_at)
- {
- 	int wally_err;
+@@ -265,8 +265,9 @@ struct wally_psbt_output *psbt_add_output(struct wally_psbt *psbt,
+
  	tal_wally_start();
  	wally_err = wally_psbt_add_tx_output_at(psbt, insert_at, 0, output);
 -	assert(wally_err == WALLY_OK);
@@ -37,3 +35,4 @@ diff --git a/bitcoin/psbt.c b/bitcoin/psbt.c
 +		return NULL;
  	return &psbt->outputs[insert_at];
  }
+

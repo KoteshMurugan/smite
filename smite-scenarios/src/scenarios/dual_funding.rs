@@ -41,6 +41,7 @@
 //! > genesis hash, P2TR address scripts, actual fee levels).  Set
 //! > `DUAL_FUNDING_CHAIN=signet` in the environment to switch.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use rand::SeedableRng;
@@ -56,6 +57,14 @@ use crate::targets::Target;
 
 /// Timeout for connection and per-message I/O.
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Counts inputs that successfully deserialized as `smite_ir::Program`
+/// (real IR mutation reaches the executor).
+static DECODE_OK: AtomicU64 = AtomicU64::new(0);
+
+/// Counts inputs that failed to deserialize and fell back to the seeded
+/// `InteractiveTxGenerator` (AFL's mutation effectively discarded).
+static DECODE_ERR: AtomicU64 = AtomicU64::new(0);
 
 /// Regtest genesis block hash (Bitcoin internal byte order, little-endian).
 ///
@@ -155,8 +164,12 @@ impl<T: Target> Scenario for DualFundingScenario<T> {
         // Try to decode the input as a serialized IR program.  Fall back to
         // generating a random program using the first 8 bytes as an RNG seed.
         let program = match postcard::from_bytes::<smite_ir::Program>(input) {
-            Ok(p) => p,
+            Ok(p) => {
+                DECODE_OK.fetch_add(1, Ordering::Relaxed);
+                p
+            }
             Err(_) => {
+                DECODE_ERR.fetch_add(1, Ordering::Relaxed);
                 // Derive a seed from the first 8 input bytes (0-padded if short).
                 let mut seed_bytes = [0u8; 8];
                 let copy_len = input.len().min(8);
@@ -169,6 +182,20 @@ impl<T: Target> Scenario for DualFundingScenario<T> {
                 builder.build()
             }
         };
+
+        let total = DECODE_OK.load(Ordering::Relaxed) + DECODE_ERR.load(Ordering::Relaxed);
+        if total.is_multiple_of(100) && total > 0 {
+            let ok = DECODE_OK.load(Ordering::Relaxed);
+            let err = DECODE_ERR.load(Ordering::Relaxed);
+            let pct = (ok as f64) * 100.0 / (total as f64);
+            eprintln!(
+                "decode_rate: total={total} ok={ok} err={err} ok_pct={pct:.2}%"
+            );
+            let _ = std::fs::write(
+                "/tmp/decode_rate.txt",
+                format!("total={total} ok={ok} err={err} ok_pct={pct:.4}%\n"),
+            );
+        }
 
         // Execute the IR program against the live connection.
         let mut executor = Executor::new(&mut self.conn, &self.ctx);

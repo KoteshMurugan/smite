@@ -20,9 +20,11 @@ diff --git a/openingd/dualopend.c b/openingd/dualopend.c
 --- a/openingd/dualopend.c
 +++ b/openingd/dualopend.c
 @@ -4340,7 +4340,7 @@ int main(int argc, char *argv[])
+ 	setup_locale();
+
  	struct pollfd pollfd[2];
 -	struct state *state = tal(NULL, struct state);
 +	struct state *state = talz(NULL, struct state);
- 	struct secret *none;
  	struct fee_states *fee_states;
  	enum side opener;
+ 	u8 *msg;

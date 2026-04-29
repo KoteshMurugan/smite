@@ -1,0 +1,44 @@
+# Slim CLN-only verifier. Builds CLN v25.12.1 with sanitizers, drops in
+# the bug-verify test, then verify.sh runs vanilla -> applies patches ->
+# rebuilds incrementally -> runs again. No smite/cargo (which OOMs).
+
+FROM debian:bookworm
+
+ARG CLN_VERSION=v25.12.1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential autoconf automake libtool \
+    clang lld llvm libclang-rt-14-dev \
+    libsqlite3-dev libsodium-dev libssl-dev zlib1g-dev \
+    gettext jq lowdown pkg-config \
+    python3 python3-pip python3-mako \
+    git wget ca-certificates patch \
+    && rm -rf /var/lib/apt/lists/*
+
+# CLN's build script needs python3-mako; debian package is fine, but the
+# Makefile invokes `python3 -m mako` which works only if the bin is in path.
+# python3-mako already provides this on bookworm.
+
+WORKDIR /work
+RUN git clone --depth 1 --branch ${CLN_VERSION} --recurse-submodules \
+    https://github.com/ElementsProject/lightning.git cln
+
+WORKDIR /work/cln
+
+# Configure with sanitizers but no AFL/Rust — we just want a buildable
+# CLN tree where in-tree tests can be compiled.
+# CLN's configure uses -fno-sanitize=function which is clang-only; force CC=clang.
+RUN CC=clang ./configure --disable-rust --enable-address-sanitizer --enable-ub-sanitizer
+
+# Drop the bug-verify test into bitcoin/test/. CLN's existing Makefile
+# auto-picks up bitcoin/test/run-*.c.
+COPY run-bug-verify-psbt.c /work/cln/bitcoin/test/run-bug-verify-psbt.c
+
+# Patches: copied in but NOT applied here. verify.sh applies them after
+# the unpatched run.
+COPY patches/ /work/patches/
+
+COPY verify.sh /work/verify.sh
+RUN chmod +x /work/verify.sh
+
+CMD ["/work/verify.sh"]

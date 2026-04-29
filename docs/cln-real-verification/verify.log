@@ -1,0 +1,105 @@
+
+=========================================================
+Step 1: build harness on VANILLA v25.12.1
+=========================================================
+cc bitcoin/tx.c
+cc bitcoin/tx_parts.c
+cc bitcoin/varint.c
+cc bitcoin/test/run-bug-verify-psbt.c
+ar libcommon.a
+ar: creating libcommon.a
+ld bitcoin/test/run-bug-verify-psbt
+rm external/build-x86_64-pc-linux-gnu/libwally-core-build/src/secp256k1/libsecp256k1.la
+
+=========================================================
+Step 2: run harness on VANILLA — expecting SIGABRT (bug 0002)
+=========================================================
+[bug-verify-psbt] psbt initialised: num_outputs=0
+[bug-verify-psbt] calling wally_tx_output(tmpctx, script[len=22], 100000)
+[bug-verify-psbt] wally_tx_output returned 0x5c0f7fcb4a78
+[bug-verify-psbt] calling psbt_add_output(psbt, tx_out, insert_at=999)
+[bug-verify-psbt] vanilla expected: assert fires inside psbt_add_output -> SIGABRT
+[bug-verify-psbt] patched expected: psbt_add_output returns NULL
+run-bug-verify-psbt: bitcoin/test/../psbt.c:268: struct wally_psbt_output *psbt_add_output(struct wally_psbt *, struct wally_tx_output *, size_t): Assertion `wally_err == WALLY_OK' failed.
+/work/verify.sh: line 28: 11834 Aborted                 (core dumped) ASAN_OPTIONS="$ASAN_OPT" UBSAN_OPTIONS="$UBSAN_OPT" ./"$HARNESS"
+VANILLA exit code = 134
+OK: vanilla harness aborted as expected (signal-based exit code 134)
+
+=========================================================
+Step 3: apply 4 patches
+=========================================================
+--- applying 0001-dualopend-init-reconnected.patch ---
+patching file openingd/dualopend.c
+--- applying 0002-psbt-no-assert-on-peer-input.patch ---
+patching file bitcoin/psbt.c
+--- applying 0003-interactivetx-handle-null-output.patch ---
+patching file common/interactivetx.c
+--- applying 0004-dualopend-handle-null-output.patch ---
+patching file openingd/dualopend.c
+
+=========================================================
+Step 4: confirm patched source contains the fixes
+=========================================================
+[bug 0001] dualopend.c — tal vs talz on struct state:
+4350:	struct state *state = talz(NULL, struct state);
+
+[bug 0002] psbt.c — assert removed, NULL return present:
+{
+	int wally_err;
+
+	tal_wally_start();
+	wally_err = wally_psbt_add_tx_output_at(psbt, insert_at, 0, output);
+	tal_wally_end(psbt);
+	if (wally_err != WALLY_OK)
+		return NULL;
+	return &psbt->outputs[insert_at];
+}
+
+struct wally_psbt_output *psbt_append_output(struct wally_psbt *psbt,
+					     const u8 *script,
+
+[bug 0003] interactivetx.c — NULL check on out:
+742:			out = psbt_append_output(ictx->current_psbt,
+743-						 scriptpubkey,
+
+[bug 0004] dualopend.c — NULL checks at both call sites:
+1995:				open_abort(state, "Output rejected by PSBT");
+1996-				return false;
+1997-			}
+2787:			      "funding output rejected by PSBT");
+2788-
+2789-	/* Add a serial_id for this output */
+
+=========================================================
+Step 5: incremental rebuild (only changed files recompile)
+=========================================================
+Building version v25.12.1-modded
+Version updated
+cc common/interactivetx.c
+cc common/version.c
+cc bitcoin/psbt.c
+cc bitcoin/test/run-bug-verify-psbt.c
+ar libcommon.a
+ld bitcoin/test/run-bug-verify-psbt
+
+=========================================================
+Step 6: run harness on PATCHED — expecting PATCHED_OK
+=========================================================
+[bug-verify-psbt] psbt initialised: num_outputs=0
+[bug-verify-psbt] calling wally_tx_output(tmpctx, script[len=22], 100000)
+[bug-verify-psbt] wally_tx_output returned 0x64c31443ca78
+[bug-verify-psbt] calling psbt_add_output(psbt, tx_out, insert_at=999)
+[bug-verify-psbt] vanilla expected: assert fires inside psbt_add_output -> SIGABRT
+[bug-verify-psbt] patched expected: psbt_add_output returns NULL
+[bug-verify-psbt] psbt_add_output returned (nil)
+[bug-verify-psbt] PATCHED OK: returned NULL cleanly (no assert, no NULL deref)
+PATCHED_OK
+PATCHED exit code = 0
+OK: patched harness exited cleanly with PATCHED_OK
+
+=========================================================
+RESULT
+=========================================================
+vanilla: SIGABRT (rc=134)  -> bug 0002 reproduced on real CLN
+patched: clean   (rc=0)  -> patch 0002 fixes it on real CLN
+Source-level fixes for 0001, 0003, 0004 confirmed by grep above.

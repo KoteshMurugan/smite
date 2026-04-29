@@ -13,12 +13,12 @@ NULL.
 diff --git a/common/interactivetx.c b/common/interactivetx.c
 --- a/common/interactivetx.c
 +++ b/common/interactivetx.c
-@@ -740,6 +740,8 @@ static char *process_tx_add_output(const tal_t *ctx,
+@@ -742,6 +742,8 @@ char *process_interactivetx_updates(const tal_t *ctx,
  			out = psbt_append_output(ictx->current_psbt,
  						 scriptpubkey,
- 						 amount_sat(sats));
+ 						 amt);
 +			if (!out)
 +				return tal_fmt(ctx, "Output rejected by PSBT");
+
  			psbt_output_set_serial_id(ictx->current_psbt,
- 						  out, serial_id);
- 			break;
+ 						  out,

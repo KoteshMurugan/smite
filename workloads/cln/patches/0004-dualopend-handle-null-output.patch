@@ -4,7 +4,7 @@ Subject: [PATCH 4/4] dualopend: handle NULL from psbt_append_output
 Follow-up to 0002. The two dualopend call-sites that build the funding
 PSBT must surface NULL from psbt_append_output:
 
-  - the user-output path (line ~1991): an attacker-supplied output is a
+  - the user-output path (line ~1993): an attacker-supplied output is a
     peer-protocol error and should send tx_abort, not crash.
 
   - the funding-output path (line ~2778): if libwally rejects our own
@@ -12,28 +12,30 @@ PSBT must surface NULL from psbt_append_output:
     status_failed() instead of dereferencing NULL.
 
 ---
- openingd/dualopend.c | 8 ++++++++
- 1 file changed, 8 insertions(+)
+ openingd/dualopend.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
 
 diff --git a/openingd/dualopend.c b/openingd/dualopend.c
 --- a/openingd/dualopend.c
 +++ b/openingd/dualopend.c
-@@ -1988,6 +1988,10 @@ static bool run_tx_interactive(struct state *state,
- 			out = psbt_append_output(ictx->current_psbt,
- 						 scriptpubkey,
- 						 amount_sat(sats));
+@@ -1991,6 +1991,10 @@ static bool run_tx_interactive(struct state *state,
+ 			}
+
+ 			out = psbt_append_output(psbt, scriptpubkey, amt);
 +			if (!out) {
 +				open_abort(state, "Output rejected by PSBT");
 +				return false;
 +			}
- 			psbt_output_set_serial_id(ictx->current_psbt,
- 						  out, serial_id);
+ 			psbt_output_set_serial_id(psbt, out, serial_id);
  			break;
-@@ -2775,6 +2779,8 @@ static u8 *accepter_commits(struct state *state,
- 	funding_out = psbt_append_output(psbt,
+ 		}
+@@ -2778,6 +2782,9 @@ static void add_funding_output(struct tx_state *tx_state,
+ 	funding_out = psbt_append_output(tx_state->psbt,
  					 scriptpubkey_p2wsh(tmpctx, wscript),
- 					 total_funding);
+ 					 total);
 +	if (!funding_out)
-+		status_failed(STATUS_FAIL_INTERNAL_ERROR, "funding output rejected by PSBT");
- 	psbt_output_set_serial_id(psbt, funding_out,
- 				  state->funding_serial);
++		status_failed(STATUS_FAIL_INTERNAL_ERROR,
++			      "funding output rejected by PSBT");
+
+ 	/* Add a serial_id for this output */
+ 	tx_state->funding_serial = psbt_new_input_serial(tx_state->psbt,

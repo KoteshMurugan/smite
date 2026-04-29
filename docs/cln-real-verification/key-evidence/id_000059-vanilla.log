@@ -1,0 +1,21 @@
+INFO  [smite_scenarios::targets::bitcoind] Starting bitcoind...
+INFO  [smite_scenarios::targets::bitcoind] Waiting for bitcoind to be ready...
+INFO  [smite_scenarios::targets::bitcoind] bitcoind is ready
+INFO  [smite_scenarios::targets::cln] Starting lightningd...
+INFO  [smite_scenarios::targets::cln] Waiting for lightningd to be ready and synced...
+INFO  [smite_scenarios::targets::cln] CLN identity pubkey: 02d942824d8720acf639b1e860d42d68675e12f89c734cced60ba62551668e07a8, blockheight: 73
+INFO  [smite_scenarios::targets::cln] CLN identity pubkey: 02d942824d8720acf639b1e860d42d68675e12f89c734cced60ba62551668e07a8, blockheight: 101
+INFO  [smite_scenarios::targets::cln] lightningd synced (blockheight=101)
+INFO  [smite_scenarios::targets::cln] CLN deposit address: bcrt1q9yaeep4r9n3af59ktdl9gks4garhexd832yhzy
+INFO  [smite_scenarios::targets::cln] CLN wallet funded with 1 BTC — dual-funding contributions enabled
+INFO  [smite_scenarios::targets::cln] Fuzzer P2WPKH address: bcrt1qu5g972mhyvln75vratlsl62ze2yh06fmtcexas
+INFO  [smite_scenarios::targets::cln] Fuzzer wallet funded — txid: 6b84a72de543d56c68537b6d1450be094dc0c899a63d8050b7db6dd1dfdcc3dd
+INFO  [smite_scenarios::targets::cln] Fuzzer UTXO ready: txid=6b84a72de543d56c68537b6d1450be094dc0c899a63d8050b7db6dd1dfdcc3dd vout=1 amount=1000000sats
+INFO  [smite_scenarios::targets::cln] Fuzzer wallet ready: 1 UTXO(s) for dual-funding
+INFO  [smite_scenarios::targets::cln] Both daemons are running, ready to fuzz
+INFO  [smite_scenarios::scenarios::dual_funding] Loaded 1 fuzzer UTXO(s) for real dual-funding contributions
+INFO  [smite_scenarios::scenarios::dual_funding] DualFundingScenario ready. chain=regtest
+INFO  [smite::scenarios] Scenario initialized! Executing input...
+INFO  [smite::runners] Reading input from "/input.bin"
+ERROR [smite_scenarios::targets] crash handler: assertion failed: "wally_err == WALLY_OK" in struct wally_psbt_output *psbt_add_output(struct wally_psbt *, struct wally_tx_output *, size_t) (bitcoin/psbt.c:268)
+ERROR [smite::runners] Test case failed: target crashed
