@@ -1,0 +1,10 @@
+=== VANILLA (tal) ===
+[bug-verify-tal] vanilla build: allocated with tal, reading reconnected
+/tmp/run-bug-verify-tal.c:95:11: runtime error: load of value 254, which is not a valid value for type '_Bool'
+exit=1
+
+=== PATCHED (talz) ===
+[bug-verify-tal] patched build: allocated with talz, reconnected = 0
+[bug-verify-tal] took fresh-channel path (reconnected was false)
+PATCHED_OK
+exit=0

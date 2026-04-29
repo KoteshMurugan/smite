@@ -1,0 +1,32 @@
+Raw mutation-stream decode rate measurement
+============================================
+
+Target: smite-scenarios/src/bin/decode_rate_fuzz.rs
+        (AFL target with CLN execution stripped — pure decode + fallback)
+
+Setup:
+  - Seed corpus: /home/surajangurajnaidu/findings/cln-nyx/default/queue
+                 (636 inputs from the 41-hour Nyx campaign)
+  - Run: AFL++ afl-fuzz, single instance, no UI
+  - Wall time: 5 minutes (300 seconds)
+
+Result (final /tmp/decode_rate.txt):
+  total = 6,714,000 inputs
+  ok    = 376,375    (5.6058% — postcard decoded as smite_ir::Program)
+  err   = 6,337,625  (94.3942% — fell back to seed-derived InteractiveTxGenerator)
+
+Throughput: 22,414 execs/sec (single core)
+
+Interpretation:
+  AFL's raw mutation output decodes as a structured Program only ~5.6%
+  of the time. The 96.4% Ok number reported earlier was measured on the
+  saved AFL queue, which is heavily biased toward inputs that produced
+  new coverage (and the structured-decode path is where coverage lives).
+
+  Both numbers are correct, they just answer different questions:
+    - Saved queue (96.4% Ok)  : where does AFL's *retained* effort go?
+    - Raw stream  (5.6% Ok)   : where does AFL's *attempted* effort go?
+
+  The 94.4% Err tail in the raw stream still does useful work — it runs
+  the seed-derived InteractiveTxGenerator path, which is what produced
+  23 of the 636 saved queue entries.
