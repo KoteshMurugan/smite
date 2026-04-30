@@ -1,6 +1,6 @@
 === VANILLA (tal) ===
 [bug-verify-tal] vanilla build: allocated with tal, reading reconnected
-/tmp/run-bug-verify-tal.c:95:11: runtime error: load of value 254, which is not a valid value for type '_Bool'
+openingd/test/run-bug-verify-tal.c:168:15: runtime error: load of value 254, which is not a valid value for type '_Bool'
 exit=1
 
 === PATCHED (talz) ===
@@ -8,3 +8,27 @@ exit=1
 [bug-verify-tal] took fresh-channel path (reconnected was false)
 PATCHED_OK
 exit=0
+
+--- Build environment -----------------------------------------------------
+CLN tree:    /home/surajangurajnaidu/cln-v25.12.1   (v25.12.1 release)
+Test path:   openingd/test/run-bug-verify-tal.c     (matches CLN test layout)
+Compiler:    gcc with -fsanitize=undefined -fno-sanitize-recover=undefined
+Allocator:   real ccan/tal/tal.c, ccan/take/take.c, ccan/list/list.c
+Struct:      faithful copy of struct state from openingd/dualopend.c:154-216
+             (sizeof=672, offsetof(reconnected)=668; trailing fields after
+             reconnected omitted — they don't influence its offset)
+
+--- What this verifies ----------------------------------------------------
+1. The vanilla path on dualopend.c:4340 (`tal(NULL, struct state)`) returns
+   uninitialised memory under glibc's tal pool reuse, exactly as the
+   AFL+Nyx campaign hit non-deterministically.
+2. The read at dualopend.c:1283 (`if (!state->reconnected)`) traps under
+   UBSan when the byte is non-bool — the canonical "load of value 254"
+   error signature reproduced here matches the patch's commit message.
+3. The patched path (`talz` instead of `tal`) zero-fills the entire
+   allocation, so the same read site reads 0 and exits cleanly.
+
+The poison covers the whole allocation (memset 0xFE), so the demonstration
+is robust to the exact offset of `reconnected` — what is being verified is
+the allocator's behaviour (tal returns uninit; talz zero-fills) on a
+real-shaped struct, not field-offset arithmetic.

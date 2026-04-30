@@ -30,9 +30,12 @@ WORKDIR /work/cln
 # CLN's configure uses -fno-sanitize=function which is clang-only; force CC=clang.
 RUN CC=clang ./configure --disable-rust --enable-address-sanitizer --enable-ub-sanitizer
 
-# Drop the bug-verify test into bitcoin/test/. CLN's existing Makefile
+# Drop the bug-verify tests into bitcoin/test/. CLN's existing Makefile
 # auto-picks up bitcoin/test/run-*.c.
+#   run-bug-verify-psbt.c -> bug 0002 (psbt assert)
+#   run-bug-verify-tal.c  -> bug 0001 (UBSan on uninit reconnected bool)
 COPY run-bug-verify-psbt.c /work/cln/bitcoin/test/run-bug-verify-psbt.c
+COPY run-bug-verify-tal.c  /work/cln/bitcoin/test/run-bug-verify-tal.c
 
 # Patches: copied in but NOT applied here. verify.sh applies them after
 # the unpatched run.
